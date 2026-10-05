@@ -1,36 +1,50 @@
 #!/usr/bin/env node
 
 // ============================================================================
-// Follow Builders — Prepare Digest
+// Follow Builders / Follow Engine — Prepare Digest
 // ============================================================================
 // Gathers everything the LLM needs to produce a digest:
-// - Fetches the central feeds (tweets + podcasts)
-// - Fetches the latest prompts from GitHub
+// - Fetches feeds (tweets, podcasts, blogs) from the configured Fork repository
+//   (or reads local feed files if explicitly enabled via --local)
+// - Fetches the latest prompts (user custom > remote Fork > local fallback)
 // - Reads the user's config (language, delivery method)
 // - Outputs a single JSON blob to stdout
 //
 // The LLM's ONLY job is to read this JSON, remix the content, and output
 // the digest text. Everything else is handled here deterministically.
 //
-// Usage: node prepare-digest.js
-// Output: JSON to stdout
+// Usage:
+//   node prepare-digest.js          # default: fetches from firstmaple-coding/follow-engine
+//   node prepare-digest.js --local  # explicit local mode: reads local feed files
 // ============================================================================
 
-import { readFile, mkdir } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { homedir } from 'os';
+import { fileURLToPath } from 'url';
 
-// -- Constants ---------------------------------------------------------------
+// -- Constants & Paths -------------------------------------------------------
 
-const USER_DIR = join(homedir(), '.follow-builders');
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(SCRIPT_DIR, '..');
+
+const USER_DIR = process.env.FOLLOW_BUILDERS_USER_DIR || join(homedir(), '.follow-builders');
 const CONFIG_PATH = join(USER_DIR, 'config.json');
 
-const FEED_X_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json';
-const FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json';
-const FEED_BLOGS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-blogs.json';
+const DEFAULT_REPO = 'firstmaple-coding/follow-engine';
+const DEFAULT_BRANCH = 'main';
 
-const PROMPTS_BASE = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/prompts';
+const FEED_REPO = process.env.FEED_REPO || DEFAULT_REPO;
+const FEED_BRANCH = process.env.FEED_BRANCH || DEFAULT_BRANCH;
+
+const RAW_BASE = `https://raw.githubusercontent.com/${FEED_REPO}/${FEED_BRANCH}`;
+
+const FEED_X_URL = `${RAW_BASE}/feed-x.json`;
+const FEED_PODCASTS_URL = `${RAW_BASE}/feed-podcasts.json`;
+const FEED_BLOGS_URL = `${RAW_BASE}/feed-blogs.json`;
+const PROMPTS_BASE = `${RAW_BASE}/prompts`;
+
 const PROMPT_FILES = [
   'summarize-podcast.md',
   'summarize-tweets.md',
@@ -39,23 +53,71 @@ const PROMPT_FILES = [
   'translate.md'
 ];
 
-// -- Fetch helpers -----------------------------------------------------------
+// -- Helpers -----------------------------------------------------------------
 
-async function fetchJSON(url) {
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  return res.json();
+async function fetchJSONWithDiagnostic(url, resourceName) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      return {
+        data: null,
+        error: `HTTP ${res.status} (${res.statusText || 'Error'}) when fetching ${resourceName} from ${url}`
+      };
+    }
+    const data = await res.json();
+    return { data, error: null };
+  } catch (err) {
+    return {
+      data: null,
+      error: `Network error when fetching ${resourceName} from ${url}: ${err.message}`
+    };
+  }
 }
 
-async function fetchText(url) {
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  return res.text();
+async function fetchTextWithDiagnostic(url, resourceName) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      return {
+        text: null,
+        error: `HTTP ${res.status} (${res.statusText || 'Error'}) when fetching ${resourceName} from ${url}`
+      };
+    }
+    const text = await res.text();
+    return { text, error: null };
+  } catch (err) {
+    return {
+      text: null,
+      error: `Network error when fetching ${resourceName} from ${url}: ${err.message}`
+    };
+  }
+}
+
+async function readLocalJSON(filePath, resourceName) {
+  if (!existsSync(filePath)) {
+    return {
+      data: null,
+      error: `Local ${resourceName} file not found: ${filePath}`
+    };
+  }
+  try {
+    const content = await readFile(filePath, 'utf-8');
+    const data = JSON.parse(content);
+    return { data, error: null };
+  } catch (err) {
+    return {
+      data: null,
+      error: `Failed to read or parse local ${resourceName} file at ${filePath}: ${err.message}`
+    };
+  }
 }
 
 // -- Main --------------------------------------------------------------------
 
 async function main() {
+  const args = process.argv.slice(2);
+  const isLocalMode = args.includes('--local') || process.env.FEED_SOURCE === 'local';
+
   const errors = [];
 
   // 1. Read user config
@@ -68,45 +130,72 @@ async function main() {
     try {
       config = JSON.parse(await readFile(CONFIG_PATH, 'utf-8'));
     } catch (err) {
-      errors.push(`Could not read config: ${err.message}`);
+      errors.push(`Could not read user config (${CONFIG_PATH}): ${err.message}`);
     }
   }
 
-  // 2. Fetch all three feeds
-  const [feedX, feedPodcasts, feedBlogs] = await Promise.all([
-    fetchJSON(FEED_X_URL),
-    fetchJSON(FEED_PODCASTS_URL),
-    fetchJSON(FEED_BLOGS_URL)
-  ]);
+  // 2. Load feeds (either via explicit local mode, or default remote Fork)
+  let feedX = null;
+  let feedPodcasts = null;
+  let feedBlogs = null;
 
-  if (!feedX) errors.push('Could not fetch tweet feed');
-  if (!feedPodcasts) errors.push('Could not fetch podcast feed');
-  if (!feedBlogs) errors.push('Could not fetch blog feed');
+  if (isLocalMode) {
+    const [resX, resPodcasts, resBlogs] = await Promise.all([
+      readLocalJSON(join(REPO_ROOT, 'feed-x.json'), 'tweet feed'),
+      readLocalJSON(join(REPO_ROOT, 'feed-podcasts.json'), 'podcast feed'),
+      readLocalJSON(join(REPO_ROOT, 'feed-blogs.json'), 'blog feed')
+    ]);
+
+    feedX = resX.data;
+    feedPodcasts = resPodcasts.data;
+    feedBlogs = resBlogs.data;
+
+    if (resX.error) errors.push(resX.error);
+    if (resPodcasts.error) errors.push(resPodcasts.error);
+    if (resBlogs.error) errors.push(resBlogs.error);
+  } else {
+    // Remote mode: fetch from Fork repository
+    const [resX, resPodcasts, resBlogs] = await Promise.all([
+      fetchJSONWithDiagnostic(FEED_X_URL, 'tweet feed'),
+      fetchJSONWithDiagnostic(FEED_PODCASTS_URL, 'podcast feed'),
+      fetchJSONWithDiagnostic(FEED_BLOGS_URL, 'blog feed')
+    ]);
+
+    feedX = resX.data;
+    feedPodcasts = resPodcasts.data;
+    feedBlogs = resBlogs.data;
+
+    if (resX.error) errors.push(resX.error);
+    if (resPodcasts.error) errors.push(resPodcasts.error);
+    if (resBlogs.error) errors.push(resBlogs.error);
+  }
+
+  // Append upstream/feed internal errors if present in payload
   if (feedX?.errors?.length) {
-    errors.push(
-      ...feedX.errors.map((error) => `Tweet feed problem: ${error}`)
-    );
+    errors.push(...feedX.errors.map(err => `Tweet feed internal issue: ${err}`));
   }
   if (feedPodcasts?.errors?.length) {
-    errors.push(
-      ...feedPodcasts.errors.map((error) => `Podcast feed problem: ${error}`)
-    );
+    errors.push(...feedPodcasts.errors.map(err => `Podcast feed internal issue: ${err}`));
   }
   if (feedBlogs?.errors?.length) {
-    errors.push(
-      ...feedBlogs.errors.map((error) => `Blog feed problem: ${error}`)
-    );
+    errors.push(...feedBlogs.errors.map(err => `Blog feed internal issue: ${err}`));
   }
 
-  // 3. Load prompts with priority: user custom > remote (GitHub) > local default
-  //
-  // If the user has a custom prompt at ~/.follow-builders/prompts/<file>,
-  // use that (they personalized it — don't overwrite with remote updates).
-  // Otherwise, fetch the latest from GitHub so they get central improvements.
-  // If GitHub is unreachable, fall back to the local copy shipped with the skill.
+  // Check fatal condition: all feeds failed
+  if (!feedX && !feedPodcasts && !feedBlogs) {
+    const targetDesc = isLocalMode ? 'local files' : `remote Fork (${FEED_REPO} on ${FEED_BRANCH} branch)`;
+    const fatalMsg = `All feed sources failed to load from ${targetDesc}.\n` +
+      errors.map(e => `  - ${e}`).join('\n') +
+      (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
+    throw new Error(fatalMsg);
+  }
+
+  // 3. Load prompts:
+  // Priority 1: User's custom prompt at ~/.follow-builders/prompts/<file>
+  // Priority 2: Remote Fork at PROMPTS_BASE/<file> (skipped in explicit --local mode)
+  // Priority 3: Local repository template at REPO_ROOT/prompts/<file>
   const prompts = {};
-  const scriptDir = decodeURIComponent(new URL('.', import.meta.url).pathname);
-  const localPromptsDir = join(scriptDir, '..', 'prompts');
+  const localPromptsDir = process.env.LOCAL_PROMPTS_DIR || join(REPO_ROOT, 'prompts');
   const userPromptsDir = join(USER_DIR, 'prompts');
 
   for (const filename of PROMPT_FILES) {
@@ -114,28 +203,64 @@ async function main() {
     const userPath = join(userPromptsDir, filename);
     const localPath = join(localPromptsDir, filename);
 
-    // Priority 1: user's custom prompt (they personalized it)
+    // Priority 1: User's custom prompt
     if (existsSync(userPath)) {
-      prompts[key] = await readFile(userPath, 'utf-8');
-      continue;
+      try {
+        prompts[key] = await readFile(userPath, 'utf-8');
+        continue;
+      } catch (err) {
+        errors.push(`Could not read custom prompt ${userPath}: ${err.message}`);
+      }
     }
 
-    // Priority 2: latest from GitHub (central updates)
-    const remote = await fetchText(`${PROMPTS_BASE}/${filename}`);
-    if (remote) {
-      prompts[key] = remote;
-      continue;
+    // Priority 2: Remote prompt from Fork (if not in explicit local mode)
+    if (!isLocalMode) {
+      const remoteRes = await fetchTextWithDiagnostic(`${PROMPTS_BASE}/${filename}`, `prompt ${filename}`);
+      if (remoteRes.text) {
+        prompts[key] = remoteRes.text;
+        continue;
+      } else {
+        // Record degradation warning
+        errors.push(`Remote prompt "${filename}" unavailable (${remoteRes.error}); falling back to local template.`);
+      }
     }
 
-    // Priority 3: local copy shipped with the skill
+    // Priority 3: Local repository template
     if (existsSync(localPath)) {
-      prompts[key] = await readFile(localPath, 'utf-8');
+      try {
+        prompts[key] = await readFile(localPath, 'utf-8');
+      } catch (err) {
+        errors.push(`Could not read local prompt template ${localPath}: ${err.message}`);
+      }
     } else {
-      errors.push(`Could not load prompt: ${filename}`);
+      errors.push(`Prompt template "${filename}" is missing (neither custom, remote, nor local found).`);
     }
   }
 
-  // 4. Build the output — everything the LLM needs in one blob
+  // Check if essential prompts are missing based on SKILL.md actual usage conditions:
+  // - digest_intro: required whenever updates exist to assemble the digest
+  // - summarize_tweets: required if there are builders with tweets (x.length > 0)
+  // - summarize_podcast: required if there are podcast episodes (podcasts.length > 0)
+  // - translate: required if updates exist AND target language is Chinese or bilingual ('zh' or 'bilingual')
+  // Note: if there are no updates, SKILL.md halts at Step 3 without remixing or translating.
+  // Note: summarize_blogs is currently not used in SKILL.md remix workflow.
+  const hasUpdates = (feedX?.x?.length || 0) > 0 || (feedPodcasts?.podcasts?.length || 0) > 0;
+  const essentialPrompts = [];
+  if (hasUpdates) {
+    essentialPrompts.push('digest_intro');
+    if ((feedX?.x?.length || 0) > 0) essentialPrompts.push('summarize_tweets');
+    if ((feedPodcasts?.podcasts?.length || 0) > 0) essentialPrompts.push('summarize_podcast');
+    if (config.language === 'zh' || config.language === 'bilingual') {
+      essentialPrompts.push('translate');
+    }
+  }
+
+  const missingEssentials = essentialPrompts.filter(p => !prompts[p]);
+  if (missingEssentials.length > 0) {
+    throw new Error(`Essential prompt(s) missing for current content/configuration: ${missingEssentials.join(', ')}.\n` + errors.map(e => `  - ${e}`).join('\n'));
+  }
+
+  // 4. Build the output — keep all original fields exactly intact
   const output = {
     status: 'ok',
     generatedAt: new Date().toISOString(),
@@ -164,7 +289,7 @@ async function main() {
     // Prompts — the LLM reads these and follows the instructions
     prompts,
 
-    // Non-fatal errors
+    // Diagnostic errors/warnings (only included if any occurred)
     errors: errors.length > 0 ? errors : undefined
   };
 
