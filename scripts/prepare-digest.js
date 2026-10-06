@@ -143,6 +143,24 @@ async function main() {
     maxFeedAgeHours = val;
   }
 
+  const ALLOWED_LANGUAGES = ['en', 'zh', 'bilingual'];
+  const langArgIndex = args.indexOf('--language') !== -1 ? args.indexOf('--language') : args.indexOf('--lang');
+  let cliLanguage = null;
+  if (langArgIndex !== -1) {
+    if (langArgIndex === args.length - 1 || args[langArgIndex + 1].startsWith('--')) {
+      throw new Error(`Flag --language requires a language argument. Allowed values are: ${ALLOWED_LANGUAGES.join(', ')}.`);
+    }
+    cliLanguage = args[langArgIndex + 1];
+    if (!ALLOWED_LANGUAGES.includes(cliLanguage)) {
+      throw new Error(`Invalid --language value "${cliLanguage}". Allowed values are: ${ALLOWED_LANGUAGES.join(', ')}.`);
+    }
+  } else if (process.env.DIGEST_LANGUAGE) {
+    cliLanguage = process.env.DIGEST_LANGUAGE;
+    if (!ALLOWED_LANGUAGES.includes(cliLanguage)) {
+      throw new Error(`Invalid DIGEST_LANGUAGE environment value "${cliLanguage}". Allowed values are: ${ALLOWED_LANGUAGES.join(', ')}.`);
+    }
+  }
+
   const errors = [];
 
   // 1. Read user config
@@ -157,6 +175,13 @@ async function main() {
     } catch (err) {
       errors.push(`Could not read user config (${CONFIG_PATH}): ${err.message}`);
     }
+  }
+  if (cliLanguage) {
+    config.language = cliLanguage;
+  }
+  if (config.language && !ALLOWED_LANGUAGES.includes(config.language)) {
+    errors.push(`Config language "${config.language}" is invalid; falling back to "en".`);
+    config.language = 'en';
   }
 
   // 2. Load feeds (either via explicit local mode, or default remote Fork)
