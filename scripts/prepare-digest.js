@@ -117,6 +117,31 @@ async function readLocalJSON(filePath, resourceName) {
 async function main() {
   const args = process.argv.slice(2);
   const isLocalMode = args.includes('--local') || process.env.FEED_SOURCE === 'local';
+  const isBlogsOnly = args.includes('--blogs-only') || process.env.BLOGS_ONLY === '1';
+
+  const feedDirArgIndex = args.indexOf('--feed-dir');
+  const feedDir = feedDirArgIndex !== -1 ? args[feedDirArgIndex + 1] : (process.env.FEED_DIR || REPO_ROOT);
+
+  const maxAgeArgIndex = args.indexOf('--max-feed-age-hours');
+  let maxFeedAgeHours = null;
+  if (maxAgeArgIndex !== -1) {
+    if (maxAgeArgIndex === args.length - 1 || args[maxAgeArgIndex + 1].startsWith('--')) {
+      throw new Error('Flag --max-feed-age-hours requires a positive numeric argument (e.g. --max-feed-age-hours 24).');
+    }
+    const rawVal = args[maxAgeArgIndex + 1];
+    const val = Number(rawVal);
+    if (!Number.isFinite(val) || val <= 0) {
+      throw new Error(`Invalid --max-feed-age-hours value: "${rawVal}". Must be a positive number of hours.`);
+    }
+    maxFeedAgeHours = val;
+  } else if (process.env.MAX_FEED_AGE_HOURS) {
+    const rawVal = process.env.MAX_FEED_AGE_HOURS;
+    const val = Number(rawVal);
+    if (!Number.isFinite(val) || val <= 0) {
+      throw new Error(`Invalid MAX_FEED_AGE_HOURS environment value: "${rawVal}". Must be a positive number of hours.`);
+    }
+    maxFeedAgeHours = val;
+  }
 
   const errors = [];
 
@@ -139,11 +164,21 @@ async function main() {
   let feedPodcasts = null;
   let feedBlogs = null;
 
-  if (isLocalMode) {
+  if (isBlogsOnly) {
+    if (isLocalMode) {
+      const resBlogs = await readLocalJSON(join(feedDir, 'feed-blogs.json'), 'blog feed');
+      feedBlogs = resBlogs.data;
+      if (resBlogs.error) errors.push(resBlogs.error);
+    } else {
+      const resBlogs = await fetchJSONWithDiagnostic(FEED_BLOGS_URL, 'blog feed');
+      feedBlogs = resBlogs.data;
+      if (resBlogs.error) errors.push(resBlogs.error);
+    }
+  } else if (isLocalMode) {
     const [resX, resPodcasts, resBlogs] = await Promise.all([
-      readLocalJSON(join(REPO_ROOT, 'feed-x.json'), 'tweet feed'),
-      readLocalJSON(join(REPO_ROOT, 'feed-podcasts.json'), 'podcast feed'),
-      readLocalJSON(join(REPO_ROOT, 'feed-blogs.json'), 'blog feed')
+      readLocalJSON(join(feedDir, 'feed-x.json'), 'tweet feed'),
+      readLocalJSON(join(feedDir, 'feed-podcasts.json'), 'podcast feed'),
+      readLocalJSON(join(feedDir, 'feed-blogs.json'), 'blog feed')
     ]);
 
     feedX = resX.data;
@@ -170,6 +205,43 @@ async function main() {
     if (resBlogs.error) errors.push(resBlogs.error);
   }
 
+  // Filter out stale feeds if maxFeedAgeHours is set, preventing old feeds from masquerading as today's content
+  if (maxFeedAgeHours !== null) {
+    const now = Date.now();
+    const filterStale = (feed, label, itemsProp) => {
+      if (!feed) return feed;
+      const items = feed[itemsProp];
+      if (!Array.isArray(items) || items.length === 0) return feed;
+
+      if (!feed.generatedAt) {
+        errors.push(`${label} is missing generatedAt timestamp; excluded under freshness policy (--max-feed-age-hours).`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
+      const genTime = new Date(feed.generatedAt).getTime();
+      if (Number.isNaN(genTime)) {
+        errors.push(`${label} has invalid generatedAt timestamp ("${feed.generatedAt}"); excluded under freshness policy (--max-feed-age-hours).`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
+      const ageHours = (now - genTime) / (1000 * 60 * 60);
+      if (ageHours < -1) {
+        errors.push(`${label} timestamp is in the future ("${feed.generatedAt}"); excluded under freshness policy (--max-feed-age-hours).`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
+      if (ageHours > maxFeedAgeHours) {
+        errors.push(`${label} is stale (${ageHours.toFixed(1)}h old, exceeds ${maxFeedAgeHours}h limit); excluded to prevent old content from masquerading as today's updates.`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
+      return feed;
+    };
+    feedX = filterStale(feedX, 'Tweet feed', 'x');
+    feedPodcasts = filterStale(feedPodcasts, 'Podcast feed', 'podcasts');
+    feedBlogs = filterStale(feedBlogs, 'Blog feed', 'blogs');
+  }
+
   // Append upstream/feed internal errors if present in payload
   if (feedX?.errors?.length) {
     errors.push(...feedX.errors.map(err => `Tweet feed internal issue: ${err}`));
@@ -181,19 +253,59 @@ async function main() {
     errors.push(...feedBlogs.errors.map(err => `Blog feed internal issue: ${err}`));
   }
 
-  // Check fatal condition: both digestible feed sources (tweets and podcasts) failed to load.
-  // The current digest workflow (SKILL.md Steps 3 & 4) only processes tweets and podcasts.
-  // If both failed to load, even if blogs succeeded, returning status "ok" with 0 updates
-  // would falsely report "No new updates from your builders today."
-  if (!feedX && !feedPodcasts) {
-    const targetDesc = isLocalMode ? 'local files' : `remote Fork (${FEED_REPO} on ${FEED_BRANCH} branch)`;
-    const prefix = (!feedBlogs)
-      ? `All feed sources failed to load from ${targetDesc}.`
-      : `All digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed; blog feed cannot be used for digest alone).`;
-    const fatalMsg = `${prefix}\n` +
-      errors.map(e => `  - ${e}`).join('\n') +
-      (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
-    throw new Error(fatalMsg);
+  // Filter blog posts to enforce mandatory original source link rule:
+  // Must have a non-empty, valid HTTP(S) URL (rejects empty/whitespace, non-HTTP(S), and invalid URLs)
+  const validBlogPosts = (feedBlogs?.blogs || []).filter(b => {
+    const rawUrl = typeof b?.url === 'string' ? b.url.trim() : '';
+    if (!rawUrl) {
+      errors.push(`Blog post "${b?.title || 'Untitled'}" missing or empty url; excluded per mandatory link rule.`);
+      return false;
+    }
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        errors.push(`Blog post "${b?.title || 'Untitled'}" has non-HTTP(S) url ("${b.url}"); excluded per mandatory link rule.`);
+        return false;
+      }
+    } catch (_) {
+      errors.push(`Blog post "${b?.title || 'Untitled'}" has invalid url ("${b.url}"); excluded per mandatory link rule.`);
+      return false;
+    }
+    b.url = rawUrl;
+    return true;
+  });
+
+  // Check fatal condition
+  const targetDesc = isLocalMode ? (feedDir !== REPO_ROOT ? `local directory (${feedDir})` : 'local files') : `remote Fork (${FEED_REPO} on ${FEED_BRANCH} branch)`;
+
+  if (isBlogsOnly) {
+    if (!feedBlogs) {
+      const fatalMsg = `Blog feed failed to load from ${targetDesc}.\n` +
+        errors.map(e => `  - ${e}`).join('\n') +
+        (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
+      throw new Error(fatalMsg);
+    }
+  } else {
+    // 1. All three feed sources failed to load
+    if (!feedX && !feedPodcasts && !feedBlogs) {
+      const fatalMsg = `All feed sources failed to load from ${targetDesc}.\n` +
+        errors.map(e => `  - ${e}`).join('\n') +
+        (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
+      throw new Error(fatalMsg);
+    }
+
+    // 2. Both tweet and podcast feeds failed to load, AND blog feed has no valid articles or failed.
+    // If blog feed succeeded and has valid articles, proceed with available blogs (recording tweet/podcast errors).
+    const hasValidBlogs = validBlogPosts.length > 0;
+    if (!feedX && !feedPodcasts && !hasValidBlogs) {
+      const prefix = (!feedBlogs)
+        ? `All feed sources failed to load from ${targetDesc}.`
+        : `All usable digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed, and blog feed has no valid articles).`;
+      const fatalMsg = `${prefix}\n` +
+        errors.map(e => `  - ${e}`).join('\n') +
+        (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
+      throw new Error(fatalMsg);
+    }
   }
 
   // 3. Load prompts:
@@ -243,19 +355,26 @@ async function main() {
     }
   }
 
-  // Check if essential prompts are missing based on SKILL.md actual usage conditions:
+  // Check if essential prompts are missing based on actual content present:
   // - digest_intro: required whenever updates exist to assemble the digest
   // - summarize_tweets: required if there are builders with tweets (x.length > 0)
   // - summarize_podcast: required if there are podcast episodes (podcasts.length > 0)
+  // - summarize_blogs: required if there are blog posts (blogs.length > 0)
   // - translate: required if updates exist AND target language is Chinese or bilingual ('zh' or 'bilingual')
   // Note: if there are no updates, SKILL.md halts at Step 3 without remixing or translating.
-  // Note: summarize_blogs is currently not used in SKILL.md remix workflow.
-  const hasUpdates = (feedX?.x?.length || 0) > 0 || (feedPodcasts?.podcasts?.length || 0) > 0;
+  const hasXUpdates = (feedX?.x?.length || 0) > 0;
+  const hasPodcastUpdates = (feedPodcasts?.podcasts?.length || 0) > 0;
+  const hasBlogUpdates = validBlogPosts.length > 0;
+  const hasUpdates = hasXUpdates || hasPodcastUpdates || hasBlogUpdates;
+
   const essentialPrompts = [];
   if (hasUpdates) {
     essentialPrompts.push('digest_intro');
-    if ((feedX?.x?.length || 0) > 0) essentialPrompts.push('summarize_tweets');
-    if ((feedPodcasts?.podcasts?.length || 0) > 0) essentialPrompts.push('summarize_podcast');
+    if (hasXUpdates) essentialPrompts.push('summarize_tweets');
+    if (hasPodcastUpdates) essentialPrompts.push('summarize_podcast');
+    if (hasBlogUpdates) {
+      essentialPrompts.push('summarize_blogs');
+    }
     if (config.language === 'zh' || config.language === 'bilingual') {
       essentialPrompts.push('translate');
     }
@@ -281,14 +400,14 @@ async function main() {
     // Content to remix
     podcasts: feedPodcasts?.podcasts || [],
     x: feedX?.x || [],
-    blogs: feedBlogs?.blogs || [],
+    blogs: validBlogPosts,
 
     // Stats for the LLM to reference
     stats: {
       podcastEpisodes: feedPodcasts?.podcasts?.length || 0,
       xBuilders: feedX?.x?.length || 0,
       totalTweets: (feedX?.x || []).reduce((sum, a) => sum + a.tweets.length, 0),
-      blogPosts: feedBlogs?.blogs?.length || 0,
+      blogPosts: validBlogPosts.length,
       feedGeneratedAt: feedX?.generatedAt || feedPodcasts?.generatedAt || feedBlogs?.generatedAt || null
     },
 

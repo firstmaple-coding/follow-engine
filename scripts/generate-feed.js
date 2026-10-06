@@ -753,71 +753,132 @@ function parseClaudeBlogIndex(html) {
   return articles;
 }
 
+function decodeHtmlEntities(str) {
+  if (!str || typeof str !== 'string') return str || '';
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .trim();
+}
+
 // Extracts the main text content from an Anthropic Engineering article page.
-// Tries the embedded JSON first (Next.js SSR data), then falls back to
-// stripping HTML tags from the article body.
+// Tries JSON-LD schema data first (used in modern Next.js App Router), then
+// Next.js embedded SSR data, then falls back to stripping HTML tags.
 function extractAnthropicArticleContent(html) {
   let title = "";
   let author = "";
   let publishedAt = null;
   let content = "";
 
-  // Try to get structured data from Next.js __NEXT_DATA__
-  const nextDataMatch = html.match(
-    /<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i,
-  );
-  if (nextDataMatch) {
+  // Strategy 1: JSON-LD structured data (standard in modern Next.js)
+  const jsonLdRegex =
+    /<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+  let jsonLdMatch;
+  while ((jsonLdMatch = jsonLdRegex.exec(html)) !== null) {
     try {
-      const data = JSON.parse(nextDataMatch[1]);
-      const pageProps = data?.props?.pageProps;
-      const post =
-        pageProps?.post || pageProps?.article || pageProps?.entry || pageProps;
-      title = post?.title || "";
-      author = post?.author?.name || post?.authors?.[0]?.name || "";
-      publishedAt =
-        post?.publishedOn || post?.publishedAt || post?.date || null;
-
-      // Extract text from the body blocks (Sanity CMS portable text format)
-      const body = post?.body || post?.content || [];
-      if (Array.isArray(body)) {
-        const textParts = [];
-        for (const block of body) {
-          if (block._type === "block" && block.children) {
-            const text = block.children.map((c) => c.text || "").join("");
-            if (text.trim()) textParts.push(text.trim());
-          }
-        }
-        content = textParts.join("\n\n");
+      const ld = JSON.parse(jsonLdMatch[1]);
+      if (
+        ld["@type"] === "BlogPosting" ||
+        ld["@type"] === "Article" ||
+        ld["@type"] === "NewsArticle"
+      ) {
+        title = ld.headline || ld.name || "";
+        author =
+          typeof ld.author === "string"
+            ? ld.author
+            : ld.author?.name ||
+              (Array.isArray(ld.author)
+                ? ld.author.map((a) => a.name || a).join(", ")
+                : "");
+        publishedAt = ld.datePublished || ld.dateCreated || null;
+        break;
       }
-      if (content) return { title, author, publishedAt, content };
     } catch {
-      // Fall through to HTML stripping
+      // Not valid JSON-LD, skip
     }
   }
 
-  // Fallback: extract title from <h1> and body from <article> or main content
-  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  if (h1Match) title = h1Match[1].replace(/<[^>]+>/g, "").trim();
+  // Strategy 2: Try Next.js __NEXT_DATA__ if present
+  if (!content) {
+    const nextDataMatch = html.match(
+      /<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i,
+    );
+    if (nextDataMatch) {
+      try {
+        const data = JSON.parse(nextDataMatch[1]);
+        const pageProps = data?.props?.pageProps;
+        const post =
+          pageProps?.post || pageProps?.article || pageProps?.entry || pageProps;
+        if (!title) title = post?.title || "";
+        if (!author)
+          author = post?.author?.name || post?.authors?.[0]?.name || "";
+        if (!publishedAt)
+          publishedAt =
+            post?.publishedOn || post?.publishedAt || post?.date || null;
 
-  // Try to find the article body and strip HTML tags
-  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-  const bodyHtml = articleMatch ? articleMatch[1] : html;
+        const body = post?.body || post?.content || [];
+        if (Array.isArray(body)) {
+          const textParts = [];
+          for (const block of body) {
+            if (block._type === "block" && block.children) {
+              const text = block.children.map((c) => c.text || "").join("");
+              if (text.trim()) textParts.push(text.trim());
+            }
+          }
+          content = textParts.join("\n\n");
+        }
+      } catch {
+        // Fall through
+      }
+    }
+  }
 
-  // Strip script/style tags first, then all remaining HTML tags
-  content = bodyHtml
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  // Strategy 3: HTML tag fallback for title, author, date
+  if (!title) {
+    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    if (h1Match) title = h1Match[1].replace(/<[^>]+>/g, "").trim();
+  }
+  if (!publishedAt) {
+    const timeMatch = html.match(/<time[^>]*datetime="([^"]+)"[^>]*>/i);
+    if (timeMatch) publishedAt = timeMatch[1];
+  }
 
-  return { title, author, publishedAt, content };
+  // Extract body from <article> or main content if not already extracted from structured blocks
+  if (!content) {
+    const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+    const bodyHtml = articleMatch ? articleMatch[1] : html;
+
+    content = bodyHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+      .replace(/<header[\s\S]*?<\/header>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  return {
+    title: decodeHtmlEntities(title),
+    author: decodeHtmlEntities(author),
+    publishedAt,
+    content,
+  };
 }
 
 // Extracts the main text content from a Claude Blog article page.
@@ -835,10 +896,20 @@ function extractClaudeBlogArticleContent(html) {
   while ((jsonLdMatch = jsonLdRegex.exec(html)) !== null) {
     try {
       const ld = JSON.parse(jsonLdMatch[1]);
-      if (ld["@type"] === "BlogPosting" || ld["@type"] === "Article") {
+      if (
+        ld["@type"] === "BlogPosting" ||
+        ld["@type"] === "Article" ||
+        ld["@type"] === "NewsArticle"
+      ) {
         title = ld.headline || ld.name || "";
-        author = ld.author?.name || "";
-        publishedAt = ld.datePublished || null;
+        author =
+          typeof ld.author === "string"
+            ? ld.author
+            : ld.author?.name ||
+              (Array.isArray(ld.author)
+                ? ld.author.map((a) => a.name || a).join(", ")
+                : "");
+        publishedAt = ld.datePublished || ld.dateCreated || null;
         break;
       }
     } catch {
@@ -853,48 +924,47 @@ function extractClaudeBlogArticleContent(html) {
     ) ||
     html.match(/<div[^>]*class="[^"]*w-richtext[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
 
-  if (richTextMatch) {
-    content = richTextMatch[1]
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  const bodyHtml = richTextMatch
+    ? richTextMatch[1]
+    : articleMatch
+      ? articleMatch[1]
+      : html;
+
+  content = bodyHtml
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[\s\S]*?<\/header>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // If rich text extraction failed, get title from <h1> if not already found
+  if (!title) {
+    const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    if (h1Match) title = h1Match[1].replace(/<[^>]+>/g, "").trim();
+  }
+  if (!publishedAt) {
+    const timeMatch = html.match(/<time[^>]*datetime="([^"]+)"[^>]*>/i);
+    if (timeMatch) publishedAt = timeMatch[1];
   }
 
-  // If rich text extraction failed, try a broader approach
-  if (!content) {
-    // Get title from <h1> if not already found
-    if (!title) {
-      const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-      if (h1Match) title = h1Match[1].replace(/<[^>]+>/g, "").trim();
-    }
-
-    // Strip the whole page down to text as a last resort
-    content = html
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-      .replace(/<header[\s\S]*?<\/header>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  return { title, author, publishedAt, content };
+  return {
+    title: decodeHtmlEntities(title),
+    author: decodeHtmlEntities(author),
+    publishedAt,
+    content,
+  };
 }
 
 // Main blog fetching orchestrator.
@@ -935,7 +1005,7 @@ async function fetchBlogContent(blogs, state, errors) {
       // backlog on first run. Articles with a known date must fall within
       // the lookback window; articles without dates are accepted if they
       // appear near the top of the listing (likely recent).
-      const MAX_INDEX_SCAN = MAX_ARTICLES_PER_BLOG; // only look at the N most recent entries
+      const MAX_INDEX_SCAN = 15; // scan top recent entries to discover unseen articles
       const newArticles = [];
       for (const article of candidates.slice(0, MAX_INDEX_SCAN)) {
         if (state.seenArticles[article.url]) continue; // already seen
@@ -1200,4 +1270,8 @@ export {
   fetchPod2txtTranscript,
   fetchXContent,
   fetchBlogContent,
+  extractAnthropicArticleContent,
+  extractClaudeBlogArticleContent,
+  parseAnthropicEngineeringIndex,
+  parseClaudeBlogIndex,
 };

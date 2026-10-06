@@ -325,19 +325,52 @@ The script outputs a single JSON blob with everything you need:
 - `config` — user's language and delivery preferences
 - `podcasts` — podcast episodes with full transcripts
 - `x` — builders with their recent tweets (text, URLs, bios)
+- `blogs` — official blog posts (Anthropic Engineering, Claude Blog, etc.)
 - `prompts` — the remix instructions to follow
-- `stats` — counts of episodes and tweets
+- `stats` — counts of episodes, tweets, and blog posts
 - `errors` — diagnostic errors or degradation warnings (do NOT ignore; check if feeds are missing or prompts fell back to local defaults)
 
 If the script fails entirely (non-zero exit code or `status: "error"`), inspect stderr for detailed HTTP or network diagnostics (e.g. 404 from Fork feeds or connection errors) and inform the user.
-Note: For offline development or testing using repository local feed files without network requests, pass `--local`:
+Note: For offline development or testing using repository local feed files without network requests, pass `--local` from repository root:
 ```bash
-cd ${CLAUDE_SKILL_DIR}/scripts && node prepare-digest.js --local
+cd ${CLAUDE_SKILL_DIR} && node scripts/prepare-digest.js --local
 ```
+
+#### Manual & Isolated Run Options (Zero-Key Manual Mode & Safe Verification)
+
+For manual blog digest generation, local testing, or running against an isolated data directory without network requests or historical feed interference.
+
+> [!IMPORTANT]
+> **Working Directory**: All commands below must be executed from the **repository root directory** (e.g. `cd ${REPO_ROOT}` or `cd ${CLAUDE_SKILL_DIR}`). If you are currently inside `scripts/`, return to the root (`cd ..`) first so that relative paths like `scripts/prepare-digest.js` resolve properly.
+
+1. **Local Mode (`--local`)**: Read feed files directly from disk with zero network requests:
+   ```bash
+   node scripts/prepare-digest.js --local
+   ```
+
+2. **Standalone Blog Ingestion (`--blogs-only`)**: Ingest blogs without reading or requiring tweet or podcast feeds:
+   ```bash
+   node scripts/prepare-digest.js --local --blogs-only
+   ```
+
+3. **Isolated Feed Directory (`--feed-dir <dir>`)**: Direct the script to read feeds strictly from a sandboxed folder (such as a temporary test directory), preventing repository root files from bleeding into the run:
+   ```bash
+   node scripts/prepare-digest.js --local --feed-dir /path/to/isolated-dir
+   ```
+
+4. **Freshness Protection (`--max-feed-age-hours <N>`)**: Exclude feeds whose `generatedAt` timestamp is older than N hours, missing, or invalid, preventing historical cache from masquerading as current updates:
+   ```bash
+   node scripts/prepare-digest.js --local --feed-dir /path/to/isolated-dir --max-feed-age-hours 24
+   ```
+
+5. **Safe Dry-Run Feed Generation (`--dry-run`)**: Test live index scraping without writing or modifying any files on disk:
+   ```bash
+   node scripts/generate-feed.js --blogs-only --dry-run
+   ```
 
 ### Step 3: Check for content
 
-If `stats.podcastEpisodes` is 0 AND `stats.xBuilders` is 0, tell the user:
+If `stats.podcastEpisodes` is 0 AND `stats.xBuilders` is 0 AND `stats.blogPosts` is 0, tell the user:
 "No new updates from your builders today. Check back tomorrow!" Then stop.
 
 ### Step 4: Remix content
@@ -349,6 +382,7 @@ Read the prompts from the `prompts` field in the JSON:
 - `prompts.digest_intro` — overall framing rules
 - `prompts.summarize_podcast` — how to remix podcast transcripts
 - `prompts.summarize_tweets` — how to remix tweets
+- `prompts.summarize_blogs` — how to summarize official blog posts
 - `prompts.translate` — how to translate to Chinese
 
 **Tweets (process first):** The `x` array has builders with tweets. Process one at a time:
@@ -356,7 +390,12 @@ Read the prompts from the `prompts` field in the JSON:
 2. Summarize their `tweets` using `prompts.summarize_tweets`
 3. Every tweet MUST include its `url` from the JSON
 
-**Podcast (process second):** The `podcasts` array has at most 1 episode. If present:
+**Blogs (process second):** The `blogs` array has articles from official blogs. Process one at a time:
+1. Use `name` for the blog name and `title` for the headline
+2. Summarize each post using `prompts.summarize_blogs`
+3. Every blog post MUST include its direct `url` from the JSON
+
+**Podcast (process third):** The `podcasts` array has at most 1 episode. If present:
 1. Summarize its `transcript` using `prompts.summarize_podcast`
 2. Use `name`, `title`, and `url` from the JSON object — NOT from the transcript
 
@@ -375,7 +414,8 @@ Read `config.language` from the JSON:
 - **"zh":** Entire digest in Chinese. Follow `prompts.translate`.
 - **"bilingual":** Interleave English and Chinese **paragraph by paragraph**.
   For each builder's tweet summary: English version, then Chinese translation
-  directly below, then the next builder. For the podcast: English summary,
+  directly below, then the next builder. For each blog post: English summary,
+  then Chinese translation directly below. For the podcast: English summary,
   then Chinese translation directly below. Like this:
 
   ```
