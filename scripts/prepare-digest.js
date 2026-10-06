@@ -253,6 +253,28 @@ async function main() {
     errors.push(...feedBlogs.errors.map(err => `Blog feed internal issue: ${err}`));
   }
 
+  // Filter blog posts to enforce mandatory original source link rule:
+  // Must have a non-empty, valid HTTP(S) URL (rejects empty/whitespace, non-HTTP(S), and invalid URLs)
+  const validBlogPosts = (feedBlogs?.blogs || []).filter(b => {
+    const rawUrl = typeof b?.url === 'string' ? b.url.trim() : '';
+    if (!rawUrl) {
+      errors.push(`Blog post "${b?.title || 'Untitled'}" missing or empty url; excluded per mandatory link rule.`);
+      return false;
+    }
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        errors.push(`Blog post "${b?.title || 'Untitled'}" has non-HTTP(S) url ("${b.url}"); excluded per mandatory link rule.`);
+        return false;
+      }
+    } catch (_) {
+      errors.push(`Blog post "${b?.title || 'Untitled'}" has invalid url ("${b.url}"); excluded per mandatory link rule.`);
+      return false;
+    }
+    b.url = rawUrl;
+    return true;
+  });
+
   // Check fatal condition
   const targetDesc = isLocalMode ? (feedDir !== REPO_ROOT ? `local directory (${feedDir})` : 'local files') : `remote Fork (${FEED_REPO} on ${FEED_BRANCH} branch)`;
 
@@ -272,13 +294,13 @@ async function main() {
       throw new Error(fatalMsg);
     }
 
-    // 2. Both tweet and podcast feeds failed to load, AND blog feed has no articles or failed.
-    // If blog feed succeeded and has articles, proceed with available blogs (recording tweet/podcast errors).
-    const hasAnyBlogs = (feedBlogs?.blogs?.length || 0) > 0;
-    if (!feedX && !feedPodcasts && !hasAnyBlogs) {
+    // 2. Both tweet and podcast feeds failed to load, AND blog feed has no valid articles or failed.
+    // If blog feed succeeded and has valid articles, proceed with available blogs (recording tweet/podcast errors).
+    const hasValidBlogs = validBlogPosts.length > 0;
+    if (!feedX && !feedPodcasts && !hasValidBlogs) {
       const prefix = (!feedBlogs)
         ? `All feed sources failed to load from ${targetDesc}.`
-        : `All usable digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed, and blog feed has no articles).`;
+        : `All usable digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed, and blog feed has no valid articles).`;
       const fatalMsg = `${prefix}\n` +
         errors.map(e => `  - ${e}`).join('\n') +
         (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
@@ -332,15 +354,6 @@ async function main() {
       errors.push(`Prompt template "${filename}" is missing (neither custom, remote, nor local found).`);
     }
   }
-
-  // Filter blog posts to enforce mandatory original source link rule
-  const validBlogPosts = (feedBlogs?.blogs || []).filter(b => {
-    if (!b.url) {
-      errors.push(`Blog post "${b.title || 'Untitled'}" missing url; excluded per mandatory link rule.`);
-      return false;
-    }
-    return true;
-  });
 
   // Check if essential prompts are missing based on actual content present:
   // - digest_intro: required whenever updates exist to assemble the digest

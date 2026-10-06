@@ -331,14 +331,17 @@ The script outputs a single JSON blob with everything you need:
 - `errors` — diagnostic errors or degradation warnings (do NOT ignore; check if feeds are missing or prompts fell back to local defaults)
 
 If the script fails entirely (non-zero exit code or `status: "error"`), inspect stderr for detailed HTTP or network diagnostics (e.g. 404 from Fork feeds or connection errors) and inform the user.
-Note: For offline development or testing using repository local feed files without network requests, pass `--local`:
+Note: For offline development or testing using repository local feed files without network requests, pass `--local` from repository root:
 ```bash
-cd ${CLAUDE_SKILL_DIR}/scripts && node prepare-digest.js --local
+cd ${CLAUDE_SKILL_DIR} && node scripts/prepare-digest.js --local
 ```
 
 #### Manual & Isolated Run Options (Zero-Key Manual Mode & Safe Verification)
 
-For manual blog digest generation, local testing, or running against an isolated data directory without network requests or historical feed interference:
+For manual blog digest generation, local testing, or running against an isolated data directory without network requests or historical feed interference.
+
+> [!IMPORTANT]
+> **Working Directory**: All commands below must be executed from the **repository root directory** (e.g. `cd ${REPO_ROOT}` or `cd ${CLAUDE_SKILL_DIR}`). If you are currently inside `scripts/`, return to the root (`cd ..`) first so that relative paths like `scripts/prepare-digest.js` resolve properly.
 
 1. **Local Mode (`--local`)**: Read feed files directly from disk with zero network requests:
    ```bash

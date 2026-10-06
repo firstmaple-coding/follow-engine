@@ -271,6 +271,13 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
             },
             {
               source: "blog",
+              name: "Valid Blog 2",
+              title: "Post With Trimmed Link",
+              url: "  https://example.com/trimmed-link  ",
+              content: "Good post 2."
+            },
+            {
+              source: "blog",
               name: "Invalid Blog 1",
               title: "Post Without URL Property",
               content: "Bad post 1."
@@ -281,12 +288,63 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
               title: "Post With Empty URL",
               url: "",
               content: "Bad post 2."
+            },
+            {
+              source: "blog",
+              name: "Invalid Blog 3",
+              title: "Post With Whitespace URL",
+              url: "   \t  \n ",
+              content: "Bad post 3."
+            },
+            {
+              source: "blog",
+              name: "Invalid Blog 4",
+              title: "Post With Javascript URL",
+              url: "javascript:alert(1)",
+              content: "Bad post 4."
+            },
+            {
+              source: "blog",
+              name: "Invalid Blog 5",
+              title: "Post With FTP URL",
+              url: "ftp://example.com/file",
+              content: "Bad post 5."
+            },
+            {
+              source: "blog",
+              name: "Invalid Blog 6",
+              title: "Post With Malformed URL",
+              url: "not-a-valid-url",
+              content: "Bad post 6."
             }
           ]
         }), { status: 200, statusText: 'OK' });
       }
       if (urlStr.includes('/prompts/')) {
         return new Response("# Synthetic Remote Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
+    if (scenario === 'digest_feeds_failed_blogs_invalid_links') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response("Internal Server Error", { status: 500, statusText: 'Internal Server Error' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify({
+          generatedAt: new Date().toISOString(),
+          blogs: [
+            { source: "blog", name: "Blog", title: "Post With Empty URL", url: "" },
+            { source: "blog", name: "Blog", title: "Post With Whitespace URL", url: "   " },
+            { source: "blog", name: "Blog", title: "Post With Javascript URL", url: "javascript:void(0)" }
+          ]
+        }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Remote Mock Prompt", { status: 200, statusText: 'OK' });
       }
       return new Response("Not Found", { status: 404, statusText: 'Not Found' });
     }
@@ -670,6 +728,64 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     );
   });
 
+  // --- 9c. Both tweet and podcast feeds failed and blog posts have invalid links exits with code 1 ---
+  testCase('Both tweet and podcast feeds failed and blog posts have invalid links exits with code 1', () => {
+    const res = runChild('digest_feeds_failed_blogs_invalid_links');
+    assert.strictEqual(
+      res.status,
+      1,
+      `Expected exit code 1 when tweets/podcasts fail and blogs have invalid links, got ${res.status}. Output was:\n${res.stdout}`
+    );
+
+    let errObj = null;
+    try {
+      errObj = JSON.parse(res.stderr);
+    } catch (e) {
+      assert.fail(`Stderr is not valid JSON: ${res.stderr}`);
+    }
+
+    assert.strictEqual(errObj.status, 'error');
+    assert(
+      errObj.message.includes('All usable digest feed sources failed to load') && errObj.message.includes('blog feed has no valid articles'),
+      `Message should state blog feed has no valid articles: ${errObj.message}`
+    );
+    assert(
+      errObj.message.includes('missing or empty url') || errObj.message.includes('non-HTTP(S) url'),
+      `Message should list excluded invalid posts: ${errObj.message}`
+    );
+  });
+
+  // --- 9d. Local mode reproduction: tweets/podcasts missing and blogs has only invalid links exits with code 1 ---
+  testCase('Local mode: tweets/podcasts missing and blogs has only empty/invalid links must exit 1 (not status ok)', () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), 'fe-test-isolated-invalid-blog-'));
+    try {
+      // Only write feed-blogs.json with whitespace-only URL post. Do NOT write feed-x.json or feed-podcasts.json.
+      writeFileSync(join(isolatedDir, 'feed-blogs.json'), JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        blogs: [{ source: 'blog', name: 'Isolated Blog', title: 'Empty Link Article', url: '   ' }]
+      }), 'utf-8');
+
+      const res = runChild('default', ['--local', '--feed-dir', isolatedDir]);
+      assert.strictEqual(
+        res.status,
+        1,
+        `Expected exit 1 when tweets/podcasts missing and blog link invalid, but got ${res.status}. Output:\n${res.stdout}`
+      );
+      const errObj = JSON.parse(res.stderr);
+      assert.strictEqual(errObj.status, 'error');
+      assert(
+        errObj.message.includes('All usable digest feed sources failed to load') && errObj.message.includes('blog feed has no valid articles'),
+        `Message should clarify usable sources failed and blog has no valid articles: ${errObj.message}`
+      );
+      assert(
+        errObj.message.includes('missing or empty url'),
+        `Message should report excluded blog post: ${errObj.message}`
+      );
+    } finally {
+      rmSync(isolatedDir, { recursive: true, force: true });
+    }
+  });
+
   // --- 10. Blog standalone digest (blogs have content while X and podcasts are empty) ---
   testCase('Blog standalone digest succeeds with status ok and essential prompts when X/podcasts are empty', () => {
     const res = runChild('blog_standalone_digest');
@@ -686,18 +802,27 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     assert(data.prompts.digest_intro, 'Expected digest_intro prompt to be present when updates exist');
   });
 
-  // --- 11. Mandatory source link validation (drops articles missing url) ---
-  testCase('Mandatory source links rule drops blog posts missing url and records diagnostic notice', () => {
+  // --- 11. Mandatory source link validation (drops articles missing url, whitespace, non-http, or malformed) ---
+  testCase('Mandatory source links rule drops blog posts missing, whitespace, non-HTTP(S), or malformed url', () => {
     const res = runChild('mandatory_link_validation');
     assert.strictEqual(res.status, 0, `Expected exit code 0, got ${res.status}: ${res.stderr}`);
     const data = JSON.parse(res.stdout);
     assert.strictEqual(data.status, 'ok');
-    assert.strictEqual(data.stats.blogPosts, 1, `Expected exactly 1 valid blog post, got ${data.stats.blogPosts}`);
-    assert.strictEqual(data.blogs.length, 1);
+    assert.strictEqual(data.stats.blogPosts, 2, `Expected exactly 2 valid blog posts, got ${data.stats.blogPosts}`);
+    assert.strictEqual(data.blogs.length, 2);
     assert.strictEqual(data.blogs[0].url, 'https://example.com/post-with-link');
+    assert.strictEqual(data.blogs[1].url, 'https://example.com/trimmed-link');
     assert(
-      data.errors?.some(e => e.includes('missing url; excluded per mandatory link rule')),
-      `Expected diagnostic error about missing url: ${JSON.stringify(data.errors)}`
+      data.errors?.some(e => e.includes('missing or empty url')),
+      `Expected diagnostic error about missing or empty url: ${JSON.stringify(data.errors)}`
+    );
+    assert(
+      data.errors?.some(e => e.includes('non-HTTP(S) url')),
+      `Expected diagnostic error about non-HTTP(S) url: ${JSON.stringify(data.errors)}`
+    );
+    assert(
+      data.errors?.some(e => e.includes('invalid url')),
+      `Expected diagnostic error about invalid url: ${JSON.stringify(data.errors)}`
     );
   });
 
