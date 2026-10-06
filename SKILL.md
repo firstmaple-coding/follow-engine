@@ -265,7 +265,7 @@ Do NOT proceed to the welcome digest step until the cron delivery has been verif
 Use system crontab so it runs even when the terminal is closed:
 ```bash
 SKILL_DIR="<absolute path to the skill directory>"
-(crontab -l 2>/dev/null; echo "<cron expression> cd $SKILL_DIR/scripts && node prepare-digest.js 2>/dev/null | node deliver.js 2>/dev/null") | crontab -
+(crontab -l 2>/dev/null; echo "<cron expression> cd $SKILL_DIR/scripts && node prepare-digest.js | node deliver.js 2>/dev/null") | crontab -
 ```
 Note: this runs the prepare script and pipes its output directly to delivery,
 bypassing the agent entirely. The digest won't be remixed by an LLM — it will
@@ -318,7 +318,7 @@ This script handles ALL data fetching deterministically — feeds, prompts, conf
 You do NOT fetch anything yourself.
 
 ```bash
-cd ${CLAUDE_SKILL_DIR}/scripts && node prepare-digest.js 2>/dev/null
+cd ${CLAUDE_SKILL_DIR}/scripts && node prepare-digest.js
 ```
 
 The script outputs a single JSON blob with everything you need:
@@ -327,10 +327,13 @@ The script outputs a single JSON blob with everything you need:
 - `x` — builders with their recent tweets (text, URLs, bios)
 - `prompts` — the remix instructions to follow
 - `stats` — counts of episodes and tweets
-- `errors` — non-fatal issues (IGNORE these)
+- `errors` — diagnostic errors or degradation warnings (do NOT ignore; check if feeds are missing or prompts fell back to local defaults)
 
-If the script fails entirely (no JSON output), tell the user to check their
-internet connection. Otherwise, use whatever content is in the JSON.
+If the script fails entirely (non-zero exit code or `status: "error"`), inspect stderr for detailed HTTP or network diagnostics (e.g. 404 from Fork feeds or connection errors) and inform the user.
+Note: For offline development or testing using repository local feed files without network requests, pass `--local`:
+```bash
+cd ${CLAUDE_SKILL_DIR}/scripts && node prepare-digest.js --local
+```
 
 ### Step 3: Check for content
 
