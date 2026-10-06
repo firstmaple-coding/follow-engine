@@ -187,6 +187,89 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       return new Response("Not Found", { status: 404, statusText: 'Not Found' });
     }
 
+    if (scenario === 'blog_standalone_digest') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), x: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), podcasts: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify({
+          generatedAt: new Date().toISOString(),
+          blogs: [
+            {
+              source: "blog",
+              name: "Anthropic Engineering",
+              title: "Autonomous Agents in Practice",
+              url: "https://www.anthropic.com/engineering/autonomous-agents",
+              content: "Synthetic content about building agents."
+            }
+          ]
+        }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Synthetic Remote Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
+    if (scenario === 'mandatory_link_validation') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), x: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), podcasts: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify({
+          generatedAt: new Date().toISOString(),
+          blogs: [
+            {
+              source: "blog",
+              name: "Valid Blog",
+              title: "Post With Link",
+              url: "https://example.com/post-with-link",
+              content: "Good post."
+            },
+            {
+              source: "blog",
+              name: "Invalid Blog 1",
+              title: "Post Without URL Property",
+              content: "Bad post 1."
+            },
+            {
+              source: "blog",
+              name: "Invalid Blog 2",
+              title: "Post With Empty URL",
+              url: "",
+              content: "Bad post 2."
+            }
+          ]
+        }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Synthetic Remote Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
+    if (scenario === 'empty_updates_all_zero') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), x: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), podcasts: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), blogs: [] }), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Synthetic Remote Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
     return new Response("Unhandled scenario url", { status: 500 });
   };
 } else {
@@ -501,6 +584,123 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       errObj.message.includes('HTTP 404') && errObj.message.includes('HTTP 500'),
       `Message should list diagnostic causes for both failures: ${errObj.message}`
     );
+  });
+
+  // --- 10. Blog standalone digest (blogs have content while X and podcasts are empty) ---
+  testCase('Blog standalone digest succeeds with status ok and essential prompts when X/podcasts are empty', () => {
+    const res = runChild('blog_standalone_digest');
+    assert.strictEqual(res.status, 0, `Expected exit code 0 for blog standalone digest, got ${res.status}: ${res.stderr}`);
+    const data = JSON.parse(res.stdout);
+    assert.strictEqual(data.status, 'ok');
+    assert.strictEqual(data.stats.blogPosts, 1);
+    assert.strictEqual(data.stats.xBuilders, 0);
+    assert.strictEqual(data.stats.podcastEpisodes, 0);
+    assert.strictEqual(data.blogs.length, 1);
+    assert.strictEqual(data.blogs[0].title, 'Autonomous Agents in Practice');
+    assert.strictEqual(data.blogs[0].url, 'https://www.anthropic.com/engineering/autonomous-agents');
+    assert(data.prompts.summarize_blogs, 'Expected summarize_blogs prompt to be present when blogs exist');
+    assert(data.prompts.digest_intro, 'Expected digest_intro prompt to be present when updates exist');
+  });
+
+  // --- 11. Mandatory source link validation (drops articles missing url) ---
+  testCase('Mandatory source links rule drops blog posts missing url and records diagnostic notice', () => {
+    const res = runChild('mandatory_link_validation');
+    assert.strictEqual(res.status, 0, `Expected exit code 0, got ${res.status}: ${res.stderr}`);
+    const data = JSON.parse(res.stdout);
+    assert.strictEqual(data.status, 'ok');
+    assert.strictEqual(data.stats.blogPosts, 1, `Expected exactly 1 valid blog post, got ${data.stats.blogPosts}`);
+    assert.strictEqual(data.blogs.length, 1);
+    assert.strictEqual(data.blogs[0].url, 'https://example.com/post-with-link');
+    assert(
+      data.errors?.some(e => e.includes('missing url; excluded per mandatory link rule')),
+      `Expected diagnostic error about missing url: ${JSON.stringify(data.errors)}`
+    );
+  });
+
+  // --- 12. Empty updates across all sources correctly signals zero updates ---
+  testCase('Empty updates across X, podcasts, and blogs cleanly outputs 0 updates without crashing', () => {
+    const emptyPromptsDir = mkdtempSync(join(tmpdir(), 'fe-test-empty-prompts-12-'));
+    try {
+      const res = runChild('empty_updates_all_zero', [], {
+        LOCAL_PROMPTS_DIR: emptyPromptsDir,
+        FEED_BRANCH: 'nonexistent-branch'
+      });
+      assert.strictEqual(res.status, 0, `Expected exit code 0 when all sources empty, got ${res.status}: ${res.stderr}`);
+      const data = JSON.parse(res.stdout);
+      assert.strictEqual(data.status, 'ok');
+      assert.strictEqual(data.stats.xBuilders, 0);
+      assert.strictEqual(data.stats.podcastEpisodes, 0);
+      assert.strictEqual(data.stats.blogPosts, 0);
+      assert.strictEqual(data.stats.totalTweets, 0);
+      assert.strictEqual(data.x.length, 0);
+      assert.strictEqual(data.podcasts.length, 0);
+      assert.strictEqual(data.blogs.length, 0);
+      // Confirms SKILL.md Step 3 early exit condition is met without demanding essential prompts
+      assert.strictEqual(data.stats.podcastEpisodes === 0 && data.stats.xBuilders === 0 && data.stats.blogPosts === 0, true);
+    } finally {
+      rmSync(emptyPromptsDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- 13. Feed isolation via --feed-dir ---
+  testCase('Feed isolation via --feed-dir loads strictly from specified isolated directory', () => {
+    const isolatedFeedDir = mkdtempSync(join(tmpdir(), 'fe-test-isolated-feeds-'));
+    try {
+      writeFileSync(join(isolatedFeedDir, 'feed-x.json'), JSON.stringify({ generatedAt: new Date().toISOString(), x: [] }), 'utf-8');
+      writeFileSync(join(isolatedFeedDir, 'feed-podcasts.json'), JSON.stringify({ generatedAt: new Date().toISOString(), podcasts: [] }), 'utf-8');
+      writeFileSync(join(isolatedFeedDir, 'feed-blogs.json'), JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        blogs: [{ source: 'blog', name: 'Isolated Blog', title: 'Isolated Unique Blog', url: 'https://example.com/isolated', content: 'Isolated test content' }]
+      }), 'utf-8');
+
+      const res = runChild('default', ['--local', '--feed-dir', isolatedFeedDir]);
+      assert.strictEqual(res.status, 0, `Expected exit 0 with --feed-dir, got ${res.status}: ${res.stderr}`);
+      const data = JSON.parse(res.stdout);
+      assert.strictEqual(data.status, 'ok');
+      assert.strictEqual(data.stats.blogPosts, 1);
+      assert.strictEqual(data.blogs[0].title, 'Isolated Unique Blog');
+      assert.strictEqual(data.stats.xBuilders, 0);
+      assert.strictEqual(data.stats.podcastEpisodes, 0);
+    } finally {
+      rmSync(isolatedFeedDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- 14. Staleness filtering via --max-feed-age-hours prevents old feed masquerading ---
+  testCase('Staleness check (--max-feed-age-hours) excludes old feeds so they cannot masquerade as today\'s content', () => {
+    const staleFeedDir = mkdtempSync(join(tmpdir(), 'fe-test-stale-feeds-'));
+    try {
+      const fiveDaysAgo = new Date(Date.now() - 120 * 60 * 60 * 1000).toISOString();
+      const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
+
+      writeFileSync(join(staleFeedDir, 'feed-x.json'), JSON.stringify({
+        generatedAt: fiveDaysAgo,
+        x: [{ author: 'Old Builder', tweets: [{ text: 'Old tweet from 5 days ago', url: 'https://x.com/old/1' }] }]
+      }), 'utf-8');
+      writeFileSync(join(staleFeedDir, 'feed-podcasts.json'), JSON.stringify({ generatedAt: fiveDaysAgo, podcasts: [] }), 'utf-8');
+      writeFileSync(join(staleFeedDir, 'feed-blogs.json'), JSON.stringify({
+        generatedAt: oneHourAgo,
+        blogs: [{ source: 'blog', name: 'Fresh Blog', title: 'Fresh Today Post', url: 'https://example.com/fresh', content: 'Fresh content' }]
+      }), 'utf-8');
+
+      const res = runChild('default', ['--local', '--feed-dir', staleFeedDir, '--max-feed-age-hours', '24']);
+      assert.strictEqual(res.status, 0, `Expected exit 0, got ${res.status}: ${res.stderr}`);
+      const data = JSON.parse(res.stdout);
+      assert.strictEqual(data.status, 'ok');
+      // Stale 5-day-old tweets must be excluded
+      assert.strictEqual(data.stats.xBuilders, 0, 'Stale tweets should be excluded');
+      assert.strictEqual(data.x.length, 0);
+      // Fresh blog post must be kept
+      assert.strictEqual(data.stats.blogPosts, 1, 'Fresh blog post should be retained');
+      assert.strictEqual(data.blogs[0].title, 'Fresh Today Post');
+      // Warning about stale feed in errors
+      assert(
+        data.errors?.some(e => e.includes('Tweet feed is stale') && e.includes('excluded to prevent old content from masquerading')),
+        `Expected stale warning in errors: ${JSON.stringify(data.errors)}`
+      );
+    } finally {
+      rmSync(staleFeedDir, { recursive: true, force: true });
+    }
   });
 
   // Cleanup isolated home directory

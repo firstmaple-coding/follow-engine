@@ -263,7 +263,14 @@ async function main() {
   }
 
   // Import functions for direct unit tests
-  const { saveState, fetchPodcastContent } = await import(pathToFileURL(GENERATE_SCRIPT).href);
+  const {
+    saveState,
+    fetchPodcastContent,
+    extractAnthropicArticleContent,
+    extractClaudeBlogArticleContent,
+    parseAnthropicEngineeringIndex,
+    parseClaudeBlogIndex
+  } = await import(pathToFileURL(GENERATE_SCRIPT).href);
 
   // --------------------------------------------------------------------------
   // Test 1: saveState scoped pruning (blogs-only does NOT prune tweets or podcasts)
@@ -679,7 +686,111 @@ async function main() {
   });
 
   // --------------------------------------------------------------------------
-  // Test 10: Verify real workspace files remain 100% untouched
+  // Test 11: parseAnthropicEngineeringIndex & parseClaudeBlogIndex with synthetic HTML
+  // --------------------------------------------------------------------------
+  runTest('Blog index parsers extract article slugs via App Router links and Next.js fallback', () => {
+    // Anthropic App Router regex parsing
+    const anthropicHtml = `
+      <div>
+        <a href="/engineering/how-we-contain-claude">Link 1</a>
+        <a href="/engineering/evaluating-rag-systems">Link 2</a>
+        <a href="/engineering/how-we-contain-claude">Duplicate Link</a>
+      </div>
+    `;
+    const anthropicPosts = parseAnthropicEngineeringIndex(anthropicHtml);
+    assert.strictEqual(anthropicPosts.length, 2, 'Should extract 2 unique posts');
+    assert.strictEqual(anthropicPosts[0].url, 'https://www.anthropic.com/engineering/how-we-contain-claude');
+    assert.strictEqual(anthropicPosts[1].url, 'https://www.anthropic.com/engineering/evaluating-rag-systems');
+
+    // Claude blog regex parsing
+    const claudeHtml = `
+      <section>
+        <a href="/blog/cowork-is-now-claude">Cowork</a>
+        <a href="/blog/claude-3-7-sonnet">Sonnet 3.7</a>
+      </section>
+    `;
+    const claudePosts = parseClaudeBlogIndex(claudeHtml);
+    assert.strictEqual(claudePosts.length, 2, 'Should extract 2 unique Claude posts');
+    assert.strictEqual(claudePosts[0].url, 'https://claude.com/blog/cowork-is-now-claude');
+    assert.strictEqual(claudePosts[1].url, 'https://claude.com/blog/claude-3-7-sonnet');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 12: extractAnthropicArticleContent extracts JSON-LD metadata and body
+  // --------------------------------------------------------------------------
+  runTest('extractAnthropicArticleContent extracts JSON-LD metadata, author, and decodes HTML entities', () => {
+    const syntheticHtml = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Anthropic &#8212; Engineering Claude&#39;s Sandbox</title>
+          <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "BlogPosting",
+              "headline": "Engineering Claude&#39;s Sandbox",
+              "datePublished": "2026-05-25T12:00:00Z",
+              "author": {
+                "@type": "Person",
+                "name": "Security &amp; Systems Team"
+              }
+            }
+          </script>
+        </head>
+        <body>
+          <article>
+            <h1>Engineering Claude's Sandbox</h1>
+            <p>We built a multi-layered hypervisor environment to contain autonomous agent executions safely.</p>
+            <p>Key benchmark: zero guest breakouts across 10 million test executions.</p>
+          </article>
+        </body>
+      </html>
+    `;
+
+    const extracted = extractAnthropicArticleContent(syntheticHtml);
+    assert.strictEqual(extracted.title, "Engineering Claude's Sandbox", 'Title entity &#39; should be decoded');
+    assert.strictEqual(extracted.publishedAt, "2026-05-25T12:00:00Z", 'Published date from JSON-LD should be extracted');
+    assert.strictEqual(extracted.author, "Security & Systems Team", 'Author &amp; entity should be decoded');
+    assert(extracted.content.includes('multi-layered hypervisor environment'), 'Body content should be captured');
+    assert(extracted.content.includes('zero guest breakouts'), 'Content should include key metrics');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 13: extractClaudeBlogArticleContent extracts JSON-LD metadata and rich text
+  // --------------------------------------------------------------------------
+  runTest('extractClaudeBlogArticleContent extracts headline, datePublished, and rich text content', () => {
+    const syntheticHtml = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Claude Cowork is now Claude</title>
+          <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "NewsArticle",
+              "headline": "Claude Cowork &amp; chat are now one",
+              "datePublished": "2026-09-16"
+            }
+          </script>
+        </head>
+        <body>
+          <div class="u-rich-text-blog">
+            <h2>Seamless agentic collaboration</h2>
+            <p>Today we are rolling out deep task execution inside conversational workflows.</p>
+          </div>
+        </body>
+      </html>
+    `;
+
+    const extracted = extractClaudeBlogArticleContent(syntheticHtml);
+    assert.strictEqual(extracted.title, "Claude Cowork & chat are now one", 'Headline with &amp; should be decoded');
+    assert.strictEqual(extracted.publishedAt, "2026-09-16", 'Date published should match JSON-LD');
+    assert(extracted.content.includes('Seamless agentic collaboration'), 'Content should contain heading');
+    assert(extracted.content.includes('deep task execution inside conversational workflows'), 'Content should contain paragraph');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 14: Verify real workspace files remain 100% untouched
   // --------------------------------------------------------------------------
   runTest('Workspace root files remain 100% bitwise untouched', () => {
     for (const f of filesToTrack) {
