@@ -181,10 +181,16 @@ async function main() {
     errors.push(...feedBlogs.errors.map(err => `Blog feed internal issue: ${err}`));
   }
 
-  // Check fatal condition: all feeds failed
-  if (!feedX && !feedPodcasts && !feedBlogs) {
+  // Check fatal condition: both digestible feed sources (tweets and podcasts) failed to load.
+  // The current digest workflow (SKILL.md Steps 3 & 4) only processes tweets and podcasts.
+  // If both failed to load, even if blogs succeeded, returning status "ok" with 0 updates
+  // would falsely report "No new updates from your builders today."
+  if (!feedX && !feedPodcasts) {
     const targetDesc = isLocalMode ? 'local files' : `remote Fork (${FEED_REPO} on ${FEED_BRANCH} branch)`;
-    const fatalMsg = `All feed sources failed to load from ${targetDesc}.\n` +
+    const prefix = (!feedBlogs)
+      ? `All feed sources failed to load from ${targetDesc}.`
+      : `All digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed; blog feed cannot be used for digest alone).`;
+    const fatalMsg = `${prefix}\n` +
       errors.map(e => `  - ${e}`).join('\n') +
       (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
     throw new Error(fatalMsg);

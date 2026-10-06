@@ -97,6 +97,22 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       return new Response("Not Found", { status: 404, statusText: 'Not Found' });
     }
 
+    if (scenario === 'digest_feeds_failed_blogs_ok') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response("404 Not Found", { status: 404, statusText: 'Not Found' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response("500 Internal Server Error", { status: 500, statusText: 'Internal Server Error' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify(sampleFeedBlogs), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Remote Mock Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
     if (scenario === 'prompt_fallback') {
       if (urlStr.endsWith('feed-x.json')) {
         return new Response(JSON.stringify(sampleFeedX), { status: 200, statusText: 'OK' });
@@ -454,6 +470,37 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       rmSync(emptyPromptsDir, { recursive: true, force: true });
       rmSync(testUserDir, { recursive: true, force: true });
     }
+  });
+
+  // --- 9. Both digest feed sources failed (tweets + podcasts) exits with code 1 even if blog feed succeeds ---
+  testCase('Both digest feed sources failed exits with code 1 even if blog feed succeeds', () => {
+    const res = runChild('digest_feeds_failed_blogs_ok');
+    assert.strictEqual(
+      res.status,
+      1,
+      `Expected exit code 1 when both tweet & podcast feeds fail, but got ${res.status}. Output was:\n${res.stdout}`
+    );
+
+    let errObj = null;
+    try {
+      errObj = JSON.parse(res.stderr);
+    } catch (e) {
+      assert.fail(`Stderr is not valid JSON: ${res.stderr}`);
+    }
+
+    assert.strictEqual(errObj.status, 'error');
+    assert(
+      errObj.message.includes('All digest feed sources failed to load'),
+      `Message should state digest feed sources failed: ${errObj.message}`
+    );
+    assert(
+      errObj.message.includes('both tweets and podcasts failed'),
+      `Message should clarify both tweets and podcasts failed: ${errObj.message}`
+    );
+    assert(
+      errObj.message.includes('HTTP 404') && errObj.message.includes('HTTP 500'),
+      `Message should list diagnostic causes for both failures: ${errObj.message}`
+    );
   });
 
   // Cleanup isolated home directory
