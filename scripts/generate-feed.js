@@ -9,13 +9,15 @@
 // Deduplication: tracks previously seen tweet IDs, episode GUIDs, and article
 // URLs in state-feed.json so content is never repeated across runs.
 //
-// Usage: node generate-feed.js [--tweets-only | --podcasts-only | --blogs-only]
+// Usage: node generate-feed.js [--tweets-only | --podcasts-only | --blogs-only] [--dry-run]
+// --dry-run: 不写文件，仍可能联网及产生 API 费用
 // Env vars needed: X_BEARER_TOKEN, POD2TXT_API_KEY
 // ============================================================================
 
 import { readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import { join } from "path";
+import { join, resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
 // -- Constants ---------------------------------------------------------------
 
@@ -35,7 +37,7 @@ const X_RETRY_STATUSES = new Set([500, 502, 503, 504]);
 const X_RETRY_ATTEMPTS = 3;
 
 // State file lives in the repo root so it gets committed by GitHub Actions
-const SCRIPT_DIR = decodeURIComponent(new URL(".", import.meta.url).pathname);
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_PATH = join(SCRIPT_DIR, "..", "state-feed.json");
 
 // -- State Management --------------------------------------------------------
@@ -57,19 +59,30 @@ async function loadState() {
   }
 }
 
-async function saveState(state) {
-  // Prune entries older than 7 days to prevent the file from growing forever
+async function saveState(
+  state,
+  activeTypes = { tweets: true, podcasts: true, blogs: true },
+  statePath = STATE_PATH,
+) {
+  // Prune entries older than 7 days only for active feed types
+  // to avoid mutating other categories (e.g. --blogs-only touching tweets/podcasts).
   const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const [id, ts] of Object.entries(state.seenTweets)) {
-    if (ts < cutoff) delete state.seenTweets[id];
+  if (activeTypes.tweets) {
+    for (const [id, ts] of Object.entries(state.seenTweets || {})) {
+      if (ts < cutoff) delete state.seenTweets[id];
+    }
   }
-  for (const [id, ts] of Object.entries(state.seenVideos)) {
-    if (ts < cutoff) delete state.seenVideos[id];
+  if (activeTypes.podcasts) {
+    for (const [id, ts] of Object.entries(state.seenVideos || {})) {
+      if (ts < cutoff) delete state.seenVideos[id];
+    }
   }
-  for (const [id, ts] of Object.entries(state.seenArticles || {})) {
-    if (ts < cutoff) delete state.seenArticles[id];
+  if (activeTypes.blogs) {
+    for (const [id, ts] of Object.entries(state.seenArticles || {})) {
+      if (ts < cutoff) delete state.seenArticles[id];
+    }
   }
-  await writeFile(STATE_PATH, JSON.stringify(state, null, 2));
+  await writeFile(statePath, JSON.stringify(state, null, 2));
 }
 
 // -- Load Sources ------------------------------------------------------------
@@ -465,9 +478,6 @@ async function fetchPodcastContent(podcasts, apiKey, state, errors) {
       apiKey,
     );
 
-    // Mark as seen regardless so we don't retry failed episodes daily
-    state.seenVideos[selected.guid] = Date.now();
-
     if (result.error) {
       console.error(
         `    Transcript error: ${result.error} — skipping to next candidate`,
@@ -484,6 +494,10 @@ async function fetchPodcastContent(podcasts, apiKey, state, errors) {
       );
       continue;
     }
+
+    // Only mark as seen once transcript is successfully acquired.
+    // If pod2txt fails or returns an error, keep it un-seen so subsequent runs can retry.
+    state.seenVideos[selected.guid] = Date.now();
 
     console.error(
       `    Selected: "${selected.title}" (transcript: ${result.transcript.length} chars)`,
@@ -1004,9 +1018,16 @@ async function fetchBlogContent(blogs, state, errors) {
 
 async function main() {
   const args = process.argv.slice(2);
+  const dryRun = args.includes("--dry-run");
   const tweetsOnly = args.includes("--tweets-only");
   const podcastsOnly = args.includes("--podcasts-only");
   const blogsOnly = args.includes("--blogs-only");
+
+  if (dryRun) {
+    console.error(
+      "[dry-run] Dry run mode enabled (不写文件，仍可能联网及产生 API 费用). No feed files or state will be written.",
+    );
+  }
 
   // If a specific --*-only flag is set, only that feed type runs.
   // If no flag is set, all three run.
@@ -1064,13 +1085,19 @@ async function main() {
       stats: { xBuilders: xContent.length, totalTweets },
       errors: xErrors.length > 0 ? xErrors : undefined,
     };
-    await writeFile(
-      join(SCRIPT_DIR, "..", "feed-x.json"),
-      JSON.stringify(xFeed, null, 2),
-    );
-    console.error(
-      `  feed-x.json: ${xContent.length} builders, ${totalTweets} tweets`,
-    );
+    if (dryRun) {
+      console.error(
+        `[dry-run] feed-x.json: ${xContent.length} builders, ${totalTweets} tweets (skipped write)`,
+      );
+    } else {
+      await writeFile(
+        join(SCRIPT_DIR, "..", "feed-x.json"),
+        JSON.stringify(xFeed, null, 2),
+      );
+      console.error(
+        `  feed-x.json: ${xContent.length} builders, ${totalTweets} tweets`,
+      );
+    }
   }
 
   // Fetch podcasts
@@ -1094,11 +1121,17 @@ async function main() {
           ? errors.filter((e) => e.startsWith("Podcast"))
           : undefined,
     };
-    await writeFile(
-      join(SCRIPT_DIR, "..", "feed-podcasts.json"),
-      JSON.stringify(podcastFeed, null, 2),
-    );
-    console.error(`  feed-podcasts.json: ${podcasts.length} episodes`);
+    if (dryRun) {
+      console.error(
+        `[dry-run] feed-podcasts.json: ${podcasts.length} episodes (skipped write)`,
+      );
+    } else {
+      await writeFile(
+        join(SCRIPT_DIR, "..", "feed-podcasts.json"),
+        JSON.stringify(podcastFeed, null, 2),
+      );
+      console.error(`  feed-podcasts.json: ${podcasts.length} episodes`);
+    }
   }
 
   // Fetch blog posts
@@ -1117,22 +1150,54 @@ async function main() {
           ? errors.filter((e) => e.startsWith("Blog"))
           : undefined,
     };
-    await writeFile(
-      join(SCRIPT_DIR, "..", "feed-blogs.json"),
-      JSON.stringify(blogFeed, null, 2),
-    );
-    console.error(`  feed-blogs.json: ${blogContent.length} posts`);
+    if (dryRun) {
+      console.error(
+        `[dry-run] feed-blogs.json: ${blogContent.length} posts (skipped write)`,
+      );
+    } else {
+      await writeFile(
+        join(SCRIPT_DIR, "..", "feed-blogs.json"),
+        JSON.stringify(blogFeed, null, 2),
+      );
+      console.error(`  feed-blogs.json: ${blogContent.length} posts`);
+    }
   }
 
   // Save dedup state
-  await saveState(state);
+  if (dryRun) {
+    console.error(
+      "[dry-run] state-feed.json: skipped updating state in dry-run mode",
+    );
+  } else {
+    await saveState(state, {
+      tweets: runTweets,
+      podcasts: runPodcasts,
+      blogs: runBlogs,
+    });
+  }
 
   if (errors.length > 0) {
     console.error(`  ${errors.length} non-fatal errors`);
   }
 }
 
-main().catch((err) => {
-  console.error("Feed generation failed:", err.message);
-  process.exit(1);
-});
+const isMainModule =
+  process.argv[1] &&
+  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (isMainModule) {
+  main().catch((err) => {
+    console.error("Feed generation failed:", err.message);
+    process.exit(1);
+  });
+}
+
+export {
+  main,
+  saveState,
+  loadState,
+  fetchPodcastContent,
+  fetchPod2txtTranscript,
+  fetchXContent,
+  fetchBlogContent,
+};
