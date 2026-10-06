@@ -336,6 +336,35 @@ Note: For offline development or testing using repository local feed files witho
 cd ${CLAUDE_SKILL_DIR}/scripts && node prepare-digest.js --local
 ```
 
+#### Manual & Isolated Run Options (Zero-Key Manual Mode & Safe Verification)
+
+For manual blog digest generation, local testing, or running against an isolated data directory without network requests or historical feed interference:
+
+1. **Local Mode (`--local`)**: Read feed files directly from disk with zero network requests:
+   ```bash
+   node scripts/prepare-digest.js --local
+   ```
+
+2. **Standalone Blog Ingestion (`--blogs-only`)**: Ingest blogs without reading or requiring tweet or podcast feeds:
+   ```bash
+   node scripts/prepare-digest.js --local --blogs-only
+   ```
+
+3. **Isolated Feed Directory (`--feed-dir <dir>`)**: Direct the script to read feeds strictly from a sandboxed folder (such as a temporary test directory), preventing repository root files from bleeding into the run:
+   ```bash
+   node scripts/prepare-digest.js --local --feed-dir /path/to/isolated-dir
+   ```
+
+4. **Freshness Protection (`--max-feed-age-hours <N>`)**: Exclude feeds whose `generatedAt` timestamp is older than N hours, missing, or invalid, preventing historical cache from masquerading as current updates:
+   ```bash
+   node scripts/prepare-digest.js --local --feed-dir /path/to/isolated-dir --max-feed-age-hours 24
+   ```
+
+5. **Safe Dry-Run Feed Generation (`--dry-run`)**: Test live index scraping without writing or modifying any files on disk:
+   ```bash
+   node scripts/generate-feed.js --blogs-only --dry-run
+   ```
+
 ### Step 3: Check for content
 
 If `stats.podcastEpisodes` is 0 AND `stats.xBuilders` is 0 AND `stats.blogPosts` is 0, tell the user:

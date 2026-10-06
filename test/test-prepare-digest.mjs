@@ -157,12 +157,49 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       if (urlStr.endsWith('feed-podcasts.json')) {
         return new Response(JSON.stringify(sampleFeedPodcasts), { status: 200, statusText: 'OK' });
       }
+      // Blog feed has 0 posts: summarize_blogs is non-essential
       if (urlStr.endsWith('feed-blogs.json')) {
-        return new Response(JSON.stringify(sampleFeedBlogs), { status: 200, statusText: 'OK' });
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), blogs: [] }), { status: 200, statusText: 'OK' });
       }
       // Non-essential prompt summarize-blogs.md fails on remote, others succeed
       if (urlStr.endsWith('summarize-blogs.md')) {
         return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Remote Mock Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
+    if (scenario === 'mixed_content_missing_blog_prompt') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response(JSON.stringify(sampleFeedX), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response(JSON.stringify(sampleFeedPodcasts), { status: 200, statusText: 'OK' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify(sampleFeedBlogs), { status: 200, statusText: 'OK' });
+      }
+      // Essential prompt summarize-blogs.md missing when blogs has content
+      if (urlStr.endsWith('summarize-blogs.md')) {
+        return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+      }
+      if (urlStr.includes('/prompts/')) {
+        return new Response("# Remote Mock Prompt", { status: 200, statusText: 'OK' });
+      }
+      return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+    }
+
+    if (scenario === 'digest_feeds_failed_blogs_empty') {
+      if (urlStr.endsWith('feed-x.json')) {
+        return new Response("Not Found", { status: 404, statusText: 'Not Found' });
+      }
+      if (urlStr.endsWith('feed-podcasts.json')) {
+        return new Response("Internal Server Error", { status: 500, statusText: 'Internal Server Error' });
+      }
+      if (urlStr.endsWith('feed-blogs.json')) {
+        return new Response(JSON.stringify({ generatedAt: new Date().toISOString(), blogs: [] }), { status: 200, statusText: 'OK' });
       }
       if (urlStr.includes('/prompts/')) {
         return new Response("# Remote Mock Prompt", { status: 200, statusText: 'OK' });
@@ -500,8 +537,8 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     }
   });
 
-  // --- 7. Non-essential prompt missing (summarize_blogs) does not block digest ---
-  testCase('Non-essential prompt missing (summarize-blogs) does NOT block digest', () => {
+  // --- 7. Non-essential prompt missing (summarize_blogs when blogs empty) does not block digest ---
+  testCase('Non-essential prompt missing (summarize-blogs when blogs empty) does NOT block digest', () => {
     const customDir = mkdtempSync(join(tmpdir(), 'fe-test-prompts-no-blogs-'));
     try {
       // Copy all prompts except summarize-blogs.md
@@ -522,6 +559,33 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       assert(
         data.errors?.some(e => e.includes('summarize-blogs.md') && e.includes('missing')),
         `Expected warning about summarize-blogs.md in errors: ${JSON.stringify(data.errors)}`
+      );
+    } finally {
+      rmSync(customDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- 7b. Mixed content (tweets + podcasts + blogs) requires summarize_blogs prompt ---
+  testCase('Mixed content requires summarize_blogs prompt and fails with exit 1 if missing', () => {
+    const customDir = mkdtempSync(join(tmpdir(), 'fe-test-mixed-no-blogs-'));
+    try {
+      // Copy all prompts except summarize-blogs.md
+      const promptFiles = ['summarize-podcast.md', 'summarize-tweets.md', 'digest-intro.md', 'translate.md'];
+      for (const f of promptFiles) {
+        copyFileSync(join(REPO_ROOT, 'prompts', f), join(customDir, f));
+      }
+
+      const res = runChild('mixed_content_missing_blog_prompt', [], {
+        LOCAL_PROMPTS_DIR: customDir,
+        FEED_BRANCH: 'nonexistent-branch'
+      });
+
+      assert.strictEqual(res.status, 1, `Expected exit 1 when summarize_blogs is missing in mixed content, got ${res.status}`);
+      const errObj = JSON.parse(res.stderr);
+      assert.strictEqual(errObj.status, 'error');
+      assert(
+        errObj.message.includes('Essential prompt(s) missing') && errObj.message.includes('summarize_blogs'),
+        `Expected error message to mention missing summarize_blogs: ${errObj.message}`
       );
     } finally {
       rmSync(customDir, { recursive: true, force: true });
@@ -555,13 +619,37 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     }
   });
 
-  // --- 9. Both digest feed sources failed (tweets + podcasts) exits with code 1 even if blog feed succeeds ---
-  testCase('Both digest feed sources failed exits with code 1 even if blog feed succeeds', () => {
+  // --- 9. Default mode proceeds with available blogs when tweets and podcasts fail ---
+  testCase('Default mode proceeds with available blogs when tweets and podcasts fail (recording feed errors)', () => {
     const res = runChild('digest_feeds_failed_blogs_ok');
     assert.strictEqual(
       res.status,
+      0,
+      `Expected exit code 0 when tweets/podcasts fail but blogs succeed, got ${res.status}. Output was:\n${res.stdout}\n${res.stderr}`
+    );
+
+    const data = JSON.parse(res.stdout);
+    assert.strictEqual(data.status, 'ok');
+    assert.strictEqual(data.stats.blogPosts, 1);
+    assert.strictEqual(data.stats.xBuilders, 0);
+    assert.strictEqual(data.stats.podcastEpisodes, 0);
+    assert(
+      data.errors?.some(e => e.includes('feed-x.json') || e.includes('404')),
+      `Expected 404 error from feed-x.json in errors: ${JSON.stringify(data.errors)}`
+    );
+    assert(
+      data.errors?.some(e => e.includes('feed-podcasts.json') || e.includes('500')),
+      `Expected 500 error from feed-podcasts.json in errors: ${JSON.stringify(data.errors)}`
+    );
+  });
+
+  // --- 9b. Both digest feed sources failed and blogs empty exits with code 1 ---
+  testCase('Both digest feed sources failed and blogs empty exits with code 1', () => {
+    const res = runChild('digest_feeds_failed_blogs_empty');
+    assert.strictEqual(
+      res.status,
       1,
-      `Expected exit code 1 when both tweet & podcast feeds fail, but got ${res.status}. Output was:\n${res.stdout}`
+      `Expected exit code 1 when tweets & podcasts fail and blogs empty, but got ${res.status}. Output was:\n${res.stdout}`
     );
 
     let errObj = null;
@@ -573,12 +661,8 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
 
     assert.strictEqual(errObj.status, 'error');
     assert(
-      errObj.message.includes('All digest feed sources failed to load'),
-      `Message should state digest feed sources failed: ${errObj.message}`
-    );
-    assert(
-      errObj.message.includes('both tweets and podcasts failed'),
-      `Message should clarify both tweets and podcasts failed: ${errObj.message}`
+      errObj.message.includes('All usable digest feed sources failed to load'),
+      `Message should state usable digest feed sources failed: ${errObj.message}`
     );
     assert(
       errObj.message.includes('HTTP 404') && errObj.message.includes('HTTP 500'),
@@ -700,6 +784,83 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
       );
     } finally {
       rmSync(staleFeedDir, { recursive: true, force: true });
+    }
+  });
+
+  // --- 15. Invalid --max-feed-age-hours parameter validation ---
+  testCase('Invalid --max-feed-age-hours parameter values throw error and exit 1', () => {
+    const invalidVals = ['abc', '-5', '0'];
+    for (const val of invalidVals) {
+      const res = runChild('default', ['--local', '--max-feed-age-hours', val]);
+      assert.strictEqual(res.status, 1, `Expected exit 1 for --max-feed-age-hours ${val}, got ${res.status}`);
+      let errObj = null;
+      try {
+        errObj = JSON.parse(res.stderr);
+      } catch (e) {
+        assert.fail(`Stderr is not valid JSON: ${res.stderr}`);
+      }
+      assert.strictEqual(errObj.status, 'error');
+      assert(
+        errObj.message.includes('Invalid --max-feed-age-hours value'),
+        `Expected invalid value message for ${val}, got: ${errObj.message}`
+      );
+    }
+
+    // Missing value after flag
+    const resMissing = runChild('default', ['--local', '--max-feed-age-hours']);
+    assert.strictEqual(resMissing.status, 1, `Expected exit 1 when --max-feed-age-hours has no argument`);
+    const errMissing = JSON.parse(resMissing.stderr);
+    assert(
+      errMissing.message.includes('requires a positive numeric argument'),
+      `Expected requires positive numeric argument message, got: ${errMissing.message}`
+    );
+  });
+
+  // --- 16. Abnormal feed timestamps under freshness policy ---
+  testCase('Abnormal feed timestamps (missing, invalid date, future date) excluded under freshness check', () => {
+    const abnormalDir = mkdtempSync(join(tmpdir(), 'fe-test-abnormal-feeds-'));
+    try {
+      // 1. Missing generatedAt on tweets
+      writeFileSync(join(abnormalDir, 'feed-x.json'), JSON.stringify({
+        x: [{ id: '1', handle: 'builder1', name: 'Builder', tweets: [{ text: 'Hello', url: 'https://x.com/1/1' }] }]
+      }), 'utf-8');
+
+      // 2. Invalid date string on podcasts
+      writeFileSync(join(abnormalDir, 'feed-podcasts.json'), JSON.stringify({
+        generatedAt: 'invalid-date-string',
+        podcasts: [{ source: 'podcast', title: 'Episode', url: 'https://podcast.com/1', transcript: 'Text' }]
+      }), 'utf-8');
+
+      // 3. Future date timestamp on blogs (3 days in future)
+      const futureDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      writeFileSync(join(abnormalDir, 'feed-blogs.json'), JSON.stringify({
+        generatedAt: futureDate,
+        blogs: [{ source: 'blog', name: 'Blog', title: 'Future Post', url: 'https://example.com/future', content: 'Future text' }]
+      }), 'utf-8');
+
+      const res = runChild('default', ['--local', '--feed-dir', abnormalDir, '--max-feed-age-hours', '24']);
+      assert.strictEqual(res.status, 0, `Expected exit 0, got ${res.status}: ${res.stderr}`);
+      const data = JSON.parse(res.stdout);
+      assert.strictEqual(data.status, 'ok');
+      // All items must be excluded
+      assert.strictEqual(data.stats.xBuilders, 0, 'Tweets with missing timestamp should be excluded');
+      assert.strictEqual(data.stats.podcastEpisodes, 0, 'Podcasts with invalid date should be excluded');
+      assert.strictEqual(data.stats.blogPosts, 0, 'Blogs with future date should be excluded');
+      // Verify warnings in errors
+      assert(
+        data.errors?.some(e => e.includes('Tweet feed is missing generatedAt timestamp')),
+        `Expected missing timestamp warning: ${JSON.stringify(data.errors)}`
+      );
+      assert(
+        data.errors?.some(e => e.includes('Podcast feed has invalid generatedAt timestamp')),
+        `Expected invalid date warning: ${JSON.stringify(data.errors)}`
+      );
+      assert(
+        data.errors?.some(e => e.includes('Blog feed timestamp is in the future')),
+        `Expected future timestamp warning: ${JSON.stringify(data.errors)}`
+      );
+    } finally {
+      rmSync(abnormalDir, { recursive: true, force: true });
     }
   });
 

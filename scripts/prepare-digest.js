@@ -123,7 +123,25 @@ async function main() {
   const feedDir = feedDirArgIndex !== -1 ? args[feedDirArgIndex + 1] : (process.env.FEED_DIR || REPO_ROOT);
 
   const maxAgeArgIndex = args.indexOf('--max-feed-age-hours');
-  const maxFeedAgeHours = maxAgeArgIndex !== -1 ? parseFloat(args[maxAgeArgIndex + 1]) : (process.env.MAX_FEED_AGE_HOURS ? parseFloat(process.env.MAX_FEED_AGE_HOURS) : null);
+  let maxFeedAgeHours = null;
+  if (maxAgeArgIndex !== -1) {
+    if (maxAgeArgIndex === args.length - 1 || args[maxAgeArgIndex + 1].startsWith('--')) {
+      throw new Error('Flag --max-feed-age-hours requires a positive numeric argument (e.g. --max-feed-age-hours 24).');
+    }
+    const rawVal = args[maxAgeArgIndex + 1];
+    const val = Number(rawVal);
+    if (!Number.isFinite(val) || val <= 0) {
+      throw new Error(`Invalid --max-feed-age-hours value: "${rawVal}". Must be a positive number of hours.`);
+    }
+    maxFeedAgeHours = val;
+  } else if (process.env.MAX_FEED_AGE_HOURS) {
+    const rawVal = process.env.MAX_FEED_AGE_HOURS;
+    const val = Number(rawVal);
+    if (!Number.isFinite(val) || val <= 0) {
+      throw new Error(`Invalid MAX_FEED_AGE_HOURS environment value: "${rawVal}". Must be a positive number of hours.`);
+    }
+    maxFeedAgeHours = val;
+  }
 
   const errors = [];
 
@@ -188,16 +206,35 @@ async function main() {
   }
 
   // Filter out stale feeds if maxFeedAgeHours is set, preventing old feeds from masquerading as today's content
-  if (maxFeedAgeHours !== null && !isNaN(maxFeedAgeHours)) {
+  if (maxFeedAgeHours !== null) {
     const now = Date.now();
     const filterStale = (feed, label, itemsProp) => {
-      if (!feed || !feed.generatedAt) return feed;
+      if (!feed) return feed;
+      const items = feed[itemsProp];
+      if (!Array.isArray(items) || items.length === 0) return feed;
+
+      if (!feed.generatedAt) {
+        errors.push(`${label} is missing generatedAt timestamp; excluded under freshness policy (--max-feed-age-hours).`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
       const genTime = new Date(feed.generatedAt).getTime();
+      if (Number.isNaN(genTime)) {
+        errors.push(`${label} has invalid generatedAt timestamp ("${feed.generatedAt}"); excluded under freshness policy (--max-feed-age-hours).`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
       const ageHours = (now - genTime) / (1000 * 60 * 60);
+      if (ageHours < -1) {
+        errors.push(`${label} timestamp is in the future ("${feed.generatedAt}"); excluded under freshness policy (--max-feed-age-hours).`);
+        return { ...feed, [itemsProp]: [] };
+      }
+
       if (ageHours > maxFeedAgeHours) {
         errors.push(`${label} is stale (${ageHours.toFixed(1)}h old, exceeds ${maxFeedAgeHours}h limit); excluded to prevent old content from masquerading as today's updates.`);
         return { ...feed, [itemsProp]: [] };
       }
+
       return feed;
     };
     feedX = filterStale(feedX, 'Tweet feed', 'x');
@@ -227,11 +264,21 @@ async function main() {
       throw new Error(fatalMsg);
     }
   } else {
-    // Both digestible feed sources (tweets and podcasts) failed to load
-    if (!feedX && !feedPodcasts) {
+    // 1. All three feed sources failed to load
+    if (!feedX && !feedPodcasts && !feedBlogs) {
+      const fatalMsg = `All feed sources failed to load from ${targetDesc}.\n` +
+        errors.map(e => `  - ${e}`).join('\n') +
+        (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
+      throw new Error(fatalMsg);
+    }
+
+    // 2. Both tweet and podcast feeds failed to load, AND blog feed has no articles or failed.
+    // If blog feed succeeded and has articles, proceed with available blogs (recording tweet/podcast errors).
+    const hasAnyBlogs = (feedBlogs?.blogs?.length || 0) > 0;
+    if (!feedX && !feedPodcasts && !hasAnyBlogs) {
       const prefix = (!feedBlogs)
         ? `All feed sources failed to load from ${targetDesc}.`
-        : `All digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed; blog feed cannot be used for digest alone).`;
+        : `All usable digest feed sources failed to load from ${targetDesc} (both tweets and podcasts failed, and blog feed has no articles).`;
       const fatalMsg = `${prefix}\n` +
         errors.map(e => `  - ${e}`).join('\n') +
         (isLocalMode ? '' : '\nTip: If running offline or testing locally, pass --local to explicitly read local files.');
@@ -312,8 +359,7 @@ async function main() {
     essentialPrompts.push('digest_intro');
     if (hasXUpdates) essentialPrompts.push('summarize_tweets');
     if (hasPodcastUpdates) essentialPrompts.push('summarize_podcast');
-    // summarize_blogs is essential if blogs are the sole update source or in blogs-only mode
-    if (hasBlogUpdates && (!hasXUpdates && !hasPodcastUpdates || isBlogsOnly)) {
+    if (hasBlogUpdates) {
       essentialPrompts.push('summarize_blogs');
     }
     if (config.language === 'zh' || config.language === 'bilingual') {
