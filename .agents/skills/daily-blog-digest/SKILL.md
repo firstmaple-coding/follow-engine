@@ -12,46 +12,47 @@ description: "手动抓取最新公开官方 AI 博客（Anthropic、Claude 等�
 - **触发时机**：仅当用户明确指示生成今日早报（例如：“生成今日早报”、“获取今日 AI 动态”、“抓取博客早报”、“汇总今日博客更新”）时触发。
 - **免责与边界**：无需任何付费 API 密钥；不抓取 Twitter/X 或播客；仅在用户发起请求时执行公开博客抓取；严禁使用历史旧文章冒充今日更新。
 
-## 执行流水线
+## 执行流程与决策机制
+
+为了确保同一天多次请求早报时响应迅速、结果一致，且既有博客 feed 不被意外清空，执行时遵循“优先探测复用当天有效结果，按需执行网络抓取”的轻量策略：
 
 所有命令均需在 **仓库根目录 (`follow-engine`)** 下执行。
 
-### 步骤 1：抓取最新公开官方博客
+### 决策机制：何时复用当天结果 vs. 何时重新抓取
 
-运行博客生成端，抓取已配置的公开官方博客（如 Claude Blog、Anthropic Engineering 等）：
+1. **何时复用当天结果（优先探测）**：
+   - 当本地已有 `feed-blogs.json`，且生成时间在 24 小时以内（`maxFeedAgeHours 24` 有效），并且包含有效文章（`stats.blogPosts > 0`）时，**直接复用该文件**生成早报；
+   - 这样既避免在同一天频繁发起外部网络请求引发目标站点限流，也能保证同一天多次调用时内容不丢失、不闪退、秒级响应。
+   
+   探测命令：
+   ```bash
+   node scripts/prepare-digest.js --local --blogs-only --max-feed-age-hours 24 --language zh
+   ```
+   - 若执行成功（退出码 0，`status: "ok"` 且 `stats.blogPosts > 0`），且用户**未**要求强制刷新，直接进入【步骤 3：生成中文早报】。
 
-```bash
-node scripts/generate-feed.js --blogs-only
-```
+2. **何时重新抓取（执行抓取）**：
+   - 出现以下任一情况时，才执行网络抓取：
+     1. 本地不存在 `feed-blogs.json`（首次运行）；
+     2. 本地 feed 超过 24 小时（已过期失效，预处理返回错误退出码 1）；
+     3. 用户明确提出“重新抓取”、“刷新早报”、“获取最新更新”；
+     4. 上次探测结果为 0 篇（可能此前未发布，用户再次主动触发抓取）。
+   
+   抓取命令：
+   ```bash
+   node scripts/generate-feed.js --blogs-only
+   ```
+   *注：生成端内置了安全合并机制。即使同一天内再次运行抓取，由于已收录文章记录在 `seenArticles` 中，生成端也会自动保留 72 小时内的仍有效的已有文章，绝对不会将数据清空为零篇。*
+   抓取完成后，再次运行探测命令读取最新结构化数据并进入【步骤 2：时效与内容检查】。
 
-- 该命令会自动穿透扫描候选文章，校验文章详情页的真实发布日期；
-- 仅保留严格在 72 小时回看窗口内的新鲜文章；
-- 更新本地 `feed-blogs.json`，并更新 `state-feed.json` 中的博客去重记录；
-- 保持 `feed-x.json` 与 `feed-podcasts.json` 完全未被修改。
+### 步骤 2：时效与内容检查
 
-*(可选：若仅需离线或无写盘探测，可添加 `--dry-run` 参数)*
-
-### 步骤 2：预处理摘要数据与加载提示词
-
-运行消费端预处理脚本，将数据校验为结构化 JSON：
-
-```bash
-node scripts/prepare-digest.js --local --blogs-only --max-feed-age-hours 24 --language zh
-```
-
-- 该命令会校验 `feed-blogs.json` 的生成时间戳（24小时内时效），剔除无效或缺失 URL 的条目；
-- 载入官方提示词模版（`prompts/digest-intro.md`、`prompts/summarize-blogs.md`、`prompts/translate.md`）；
-- 输出带有 `status: "ok"`、`blogs` 数组、`prompts` 字典的 JSON。
-
-### 步骤 3：时效与内容检查
-
-检查返回 JSON 中的 `stats.blogPosts`：
+检查预处理返回 JSON 中的 `stats.blogPosts`：
 - 若 `stats.blogPosts === 0`，如实向用户报告：
   > "今天关注的官方博客没有符合时效（72小时内）的新文章。请明天再来看看！"
   然后停止执行，**绝对不要**拿历史旧文章伪造今日早报。
-- 若 `stats.blogPosts > 0`，进入步骤 4 进行早报生成。
+- 若 `stats.blogPosts > 0`，进入步骤 3 进行早报生成。
 
-### 步骤 4：生成中文早报
+### 步骤 3：生成中文早报
 
 严格依照 `prompts.summarize_blogs`、`prompts.digest_intro` 和 `prompts.translate` 规则组织 Markdown 输出：
 

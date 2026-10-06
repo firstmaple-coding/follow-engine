@@ -45,18 +45,41 @@ const STATE_PATH = join(SCRIPT_DIR, "..", "state-feed.json");
 // Tracks which tweet IDs and video IDs we've already included in feeds
 // so we never send the same content twice across runs.
 
-async function loadState() {
-  if (!existsSync(STATE_PATH)) {
+async function loadState(statePath = STATE_PATH) {
+  if (!existsSync(statePath)) {
     return { seenTweets: {}, seenVideos: {}, seenArticles: {} };
   }
   try {
-    const state = JSON.parse(await readFile(STATE_PATH, "utf-8"));
+    const state = JSON.parse(await readFile(statePath, "utf-8"));
     // Ensure seenArticles exists for older state files
     if (!state.seenArticles) state.seenArticles = {};
     return state;
   } catch {
     return { seenTweets: {}, seenVideos: {}, seenArticles: {} };
   }
+}
+
+function mergeBlogPosts(
+  newPosts = [],
+  existingPosts = [],
+  cutoffMs = Date.now() - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000,
+  nowMs = Date.now(),
+) {
+  const stillFreshExisting = (existingPosts || []).filter((item) => {
+    if (!item || !item.url) return false;
+    const pubDate = item.publishedAt ? new Date(item.publishedAt).getTime() : NaN;
+    return !isNaN(pubDate) && pubDate >= cutoffMs && pubDate <= nowMs;
+  });
+
+  const seenUrls = new Set((newPosts || []).map((b) => b.url));
+  const merged = [...(newPosts || [])];
+  for (const item of stillFreshExisting) {
+    if (!seenUrls.has(item.url)) {
+      seenUrls.add(item.url);
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 async function saveState(
@@ -1154,6 +1177,18 @@ async function main() {
   const podcastsOnly = args.includes("--podcasts-only");
   const blogsOnly = args.includes("--blogs-only");
 
+  const feedDirIndex = args.indexOf("--feed-dir");
+  let feedDir = join(SCRIPT_DIR, "..");
+  if (
+    feedDirIndex !== -1 &&
+    feedDirIndex + 1 < args.length &&
+    !args[feedDirIndex + 1].startsWith("--")
+  ) {
+    feedDir = args[feedDirIndex + 1];
+  } else if (process.env.FEED_DIR) {
+    feedDir = process.env.FEED_DIR;
+  }
+
   if (dryRun) {
     console.error(
       "[dry-run] Dry run mode enabled (不写文件，仍可能联网及产生 API 费用). No feed files or state will be written.",
@@ -1179,7 +1214,8 @@ async function main() {
   }
 
   const sources = await loadSources();
-  const state = await loadState();
+  const statePath = join(feedDir, "state-feed.json");
+  const state = await loadState(statePath);
   const errors = [];
 
   // Fetch tweets
@@ -1222,7 +1258,7 @@ async function main() {
       );
     } else {
       await writeFile(
-        join(SCRIPT_DIR, "..", "feed-x.json"),
+        join(feedDir, "feed-x.json"),
         JSON.stringify(xFeed, null, 2),
       );
       console.error(
@@ -1258,7 +1294,7 @@ async function main() {
       );
     } else {
       await writeFile(
-        join(SCRIPT_DIR, "..", "feed-podcasts.json"),
+        join(feedDir, "feed-podcasts.json"),
         JSON.stringify(podcastFeed, null, 2),
       );
       console.error(`  feed-podcasts.json: ${podcasts.length} episodes`);
@@ -1271,11 +1307,35 @@ async function main() {
     const blogContent = await fetchBlogContent(sources.blogs, state, errors);
     console.error(`  Found ${blogContent.length} new blog post(s)`);
 
+    // Retain existing fresh articles from feed-blogs.json so repeat runs on the same day
+    // (when newly fetched articles are 0 due to dedup) do not wipe out valid feeds.
+    const feedBlogsPath = join(feedDir, "feed-blogs.json");
+    let existingBlogs = [];
+    if (existsSync(feedBlogsPath)) {
+      try {
+        const existingData = JSON.parse(await readFile(feedBlogsPath, "utf-8"));
+        if (Array.isArray(existingData.blogs)) {
+          existingBlogs = existingData.blogs;
+        }
+      } catch {
+        // Ignore unreadable/corrupted feed file
+      }
+    }
+
+    const now = Date.now();
+    const blogCutoff = now - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000;
+    const mergedBlogs = mergeBlogPosts(
+      blogContent,
+      existingBlogs,
+      blogCutoff,
+      now,
+    );
+
     const blogFeed = {
       generatedAt: new Date().toISOString(),
       lookbackHours: BLOG_LOOKBACK_HOURS,
-      blogs: blogContent,
-      stats: { blogPosts: blogContent.length },
+      blogs: mergedBlogs,
+      stats: { blogPosts: mergedBlogs.length },
       errors:
         errors.filter((e) => e.startsWith("Blog")).length > 0
           ? errors.filter((e) => e.startsWith("Blog"))
@@ -1283,14 +1343,16 @@ async function main() {
     };
     if (dryRun) {
       console.error(
-        `[dry-run] feed-blogs.json: ${blogContent.length} posts (skipped write)`,
+        `[dry-run] feed-blogs.json: ${mergedBlogs.length} posts (${blogContent.length} new, ${mergedBlogs.length - blogContent.length} retained) (skipped write)`,
       );
     } else {
       await writeFile(
-        join(SCRIPT_DIR, "..", "feed-blogs.json"),
+        feedBlogsPath,
         JSON.stringify(blogFeed, null, 2),
       );
-      console.error(`  feed-blogs.json: ${blogContent.length} posts`);
+      console.error(
+        `  feed-blogs.json: ${mergedBlogs.length} posts (${blogContent.length} new, ${mergedBlogs.length - blogContent.length} retained)`,
+      );
     }
   }
 
@@ -1300,11 +1362,15 @@ async function main() {
       "[dry-run] state-feed.json: skipped updating state in dry-run mode",
     );
   } else {
-    await saveState(state, {
-      tweets: runTweets,
-      podcasts: runPodcasts,
-      blogs: runBlogs,
-    });
+    await saveState(
+      state,
+      {
+        tweets: runTweets,
+        podcasts: runPodcasts,
+        blogs: runBlogs,
+      },
+      statePath,
+    );
   }
 
   if (errors.length > 0) {
@@ -1327,6 +1393,7 @@ export {
   main,
   saveState,
   loadState,
+  mergeBlogPosts,
   fetchPodcastContent,
   fetchPod2txtTranscript,
   fetchXContent,
