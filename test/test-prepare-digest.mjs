@@ -390,6 +390,10 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     delete sanitizedEnv.FEED_SOURCE;
     delete sanitizedEnv.LOCAL_PROMPTS_DIR;
     delete sanitizedEnv.FOLLOW_BUILDERS_USER_DIR;
+    delete sanitizedEnv.DIGEST_LANGUAGE;
+    delete sanitizedEnv.BLOGS_ONLY;
+    delete sanitizedEnv.FEED_DIR;
+    delete sanitizedEnv.MAX_FEED_AGE_HOURS;
 
     const env = {
       ...sanitizedEnv,
