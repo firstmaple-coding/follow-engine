@@ -266,6 +266,7 @@ async function main() {
   const {
     saveState,
     fetchPodcastContent,
+    fetchBlogContent,
     extractAnthropicArticleContent,
     extractClaudeBlogArticleContent,
     parseAnthropicEngineeringIndex,
@@ -790,7 +791,358 @@ async function main() {
   });
 
   // --------------------------------------------------------------------------
-  // Test 14: Verify real workspace files remain 100% untouched
+  // Test 14: parseClaudeBlogIndex extracts both /resources/articles/<slug> and /blog/<slug>
+  // --------------------------------------------------------------------------
+  runTest('parseClaudeBlogIndex extracts both /resources/articles/<slug> and /blog/<slug>', () => {
+    const claudeHtml = `
+      <section>
+        <a href="/resources/articles/how-cresta-turned-cx-expertise-into-an-agent-builder-on-the-claude-agent-sdk">Cresta SDK</a>
+        <a href="https://claude.com/resources/articles/were-expanding-the-claude-startups-program-to-help-founders-build">Startups</a>
+        <a href="/blog/legacy-post-slug/">Legacy Blog Post</a>
+        <a href="/resources/articles/how-cresta-turned-cx-expertise-into-an-agent-builder-on-the-claude-agent-sdk">Duplicate Cresta</a>
+      </section>
+    `;
+    const posts = parseClaudeBlogIndex(claudeHtml);
+    assert.strictEqual(posts.length, 3, 'Should extract 3 unique posts ignoring duplicates');
+    assert.strictEqual(posts[0].url, 'https://claude.com/resources/articles/how-cresta-turned-cx-expertise-into-an-agent-builder-on-the-claude-agent-sdk');
+    assert.strictEqual(posts[1].url, 'https://claude.com/resources/articles/were-expanding-the-claude-startups-program-to-help-founders-build');
+    assert.strictEqual(posts[2].url, 'https://claude.com/blog/legacy-post-slug');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 15: extractClaudeBlogArticleContent extracts full content from <article> container despite nested divs
+  // --------------------------------------------------------------------------
+  runTest('extractClaudeBlogArticleContent extracts full content from <article> container despite nested divs', () => {
+    const htmlWithNestedDivs = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "BlogPosting",
+              "headline": "How Cresta turned CX expertise into an agent builder",
+              "datePublished": "2026-10-05",
+              "author": { "name": "Anthropic Platform Team" }
+            }
+          </script>
+        </head>
+        <body>
+          <article>
+            <h1>How Cresta turned CX expertise into an agent builder</h1>
+            <div class="text-rich-text text-rich-text--article w-richtext">
+              <p>Introduction paragraph before a callout block.</p>
+              <div class="callout-card">
+                <div>Nested div that would break non-greedy regex</div>
+              </div>
+              <p>Deep technical discussion on Agent SDK and evaluations across Claude models.</p>
+              <p>Concluding section with benchmark metrics.</p>
+            </div>
+          </article>
+        </body>
+      </html>
+    `;
+    const extracted = extractClaudeBlogArticleContent(htmlWithNestedDivs);
+    assert.strictEqual(extracted.title, "How Cresta turned CX expertise into an agent builder");
+    assert.strictEqual(extracted.publishedAt, "2026-10-05");
+    assert(extracted.content.includes("Deep technical discussion on Agent SDK"), "Must extract content after nested div");
+    assert(extracted.content.includes("Concluding section with benchmark metrics"), "Must extract entire article");
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 16: "首页无日期、详情页为旧文" -> 详情页提取出旧日期后被丢弃，不进入 feed；但记入 seenArticles
+  // --------------------------------------------------------------------------
+  await runAsyncTest('fetchBlogContent rejects candidate when index lacks date but article page has older date', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const oldDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days ago (cutoff is 72h)
+      globalThis.fetch = async (url) => {
+        const urlStr = String(url);
+        // Blog index: provides candidate without date
+        if (urlStr === 'https://www.anthropic.com/engineering') {
+          return new Response(`
+            <html>
+              <body>
+                <a href="/engineering/old-article-slug">Old Engineering Article</a>
+              </body>
+            </html>
+          `, { status: 200 });
+        }
+        // Article detail page: provides JSON-LD with old date
+        if (urlStr.includes('/engineering/old-article-slug')) {
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  {
+                    "@context": "https://schema.org",
+                    "@type": "BlogPosting",
+                    "headline": "Old Engineering Article",
+                    "datePublished": "${oldDate}"
+                  }
+                </script>
+              </head>
+              <body>
+                <article><p>Some old content that was published 10 days ago.</p></article>
+              </body>
+            </html>
+          `, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const mockBlogs = [{
+        name: "Anthropic Engineering",
+        indexUrl: "https://www.anthropic.com/engineering"
+      }];
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const errors = [];
+
+      const results = await fetchBlogContent(mockBlogs, state, errors);
+
+      assert.strictEqual(results.length, 0, 'Article older than lookback window must NOT be added to results');
+      assert(state.seenArticles['https://www.anthropic.com/engineering/old-article-slug'], 'Old article must be recorded in seenArticles to avoid repeated fetches');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 17: "旧文排在新文之前" -> 候选扫描不被前面的旧文截断，继续扫描直到取得合格新文
+  // --------------------------------------------------------------------------
+  await runAsyncTest('fetchBlogContent continues scanning past old candidates to find fresh articles', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const oldDate = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(); // 15 days ago
+      const freshDate1 = new Date(Date.now() - 10 * 60 * 60 * 1000).toISOString(); // 10 hours ago
+      const freshDate2 = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2 hours ago
+
+      // 3 old articles followed by 2 fresh articles on the index page
+      globalThis.fetch = async (url) => {
+        const urlStr = String(url);
+        if (urlStr === 'https://claude.com/blog') {
+          return new Response(`
+            <html>
+              <body>
+                <a href="/resources/articles/old-art-1">Old 1</a>
+                <a href="/resources/articles/old-art-2">Old 2</a>
+                <a href="/resources/articles/old-art-3">Old 3</a>
+                <a href="/resources/articles/fresh-art-4">Fresh 4</a>
+                <a href="/resources/articles/fresh-art-5">Fresh 5</a>
+              </body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('old-art-')) {
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  { "@context": "https://schema.org", "@type": "BlogPosting", "headline": "Old Post", "datePublished": "${oldDate}" }
+                </script>
+              </head>
+              <body><article><p>Old post content</p></article></body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('fresh-art-4')) {
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  { "@context": "https://schema.org", "@type": "BlogPosting", "headline": "Fresh Post 4", "datePublished": "${freshDate1}" }
+                </script>
+              </head>
+              <body><article><p>Fresh post 4 content</p></article></body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('fresh-art-5')) {
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  { "@context": "https://schema.org", "@type": "BlogPosting", "headline": "Fresh Post 5", "datePublished": "${freshDate2}" }
+                </script>
+              </head>
+              <body><article><p>Fresh post 5 content</p></article></body>
+            </html>
+          `, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const mockBlogs = [{
+        name: "Claude Blog",
+        indexUrl: "https://claude.com/blog"
+      }];
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const errors = [];
+
+      const results = await fetchBlogContent(mockBlogs, state, errors);
+
+      // Verify scanner did NOT give up after the first 3 old articles
+      assert.strictEqual(results.length, 2, 'Must discover both fresh articles despite initial old articles');
+      assert.strictEqual(results[0].title, 'Fresh Post 4');
+      assert.strictEqual(results[1].title, 'Fresh Post 5');
+      // All 5 candidates should now be recorded in seenArticles
+      assert(state.seenArticles['https://claude.com/resources/articles/old-art-1']);
+      assert(state.seenArticles['https://claude.com/resources/articles/old-art-2']);
+      assert(state.seenArticles['https://claude.com/resources/articles/old-art-3']);
+      assert(state.seenArticles['https://claude.com/resources/articles/fresh-art-4']);
+      assert(state.seenArticles['https://claude.com/resources/articles/fresh-art-5']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 18: Article with missing date, invalid date, or future date is excluded from feed
+  // --------------------------------------------------------------------------
+  await runAsyncTest('fetchBlogContent excludes articles with missing, invalid, or far-future dates', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days in future
+      globalThis.fetch = async (url) => {
+        const urlStr = String(url);
+        if (urlStr === 'https://claude.com/blog') {
+          return new Response(`
+            <html>
+              <body>
+                <a href="/resources/articles/no-date">No Date</a>
+                <a href="/resources/articles/bad-date">Bad Date</a>
+                <a href="/resources/articles/future-date">Future Date</a>
+              </body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('no-date')) {
+          return new Response(`
+            <html>
+              <body><article><p>Content with no date</p></article></body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('bad-date')) {
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  { "@context": "https://schema.org", "@type": "BlogPosting", "headline": "Bad Date", "datePublished": "not-a-valid-date-string" }
+                </script>
+              </head>
+              <body><article><p>Content with bad date</p></article></body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('future-date')) {
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  { "@context": "https://schema.org", "@type": "BlogPosting", "headline": "Future Date", "datePublished": "${futureDate}" }
+                </script>
+              </head>
+              <body><article><p>Content from the future</p></article></body>
+            </html>
+          `, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const mockBlogs = [{
+        name: "Claude Blog",
+        indexUrl: "https://claude.com/blog"
+      }];
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const errors = [];
+
+      const results = await fetchBlogContent(mockBlogs, state, errors);
+
+      assert.strictEqual(results.length, 0, 'No articles with missing, invalid, or future dates should be included');
+      assert.strictEqual(state.seenArticles['https://claude.com/resources/articles/no-date'], undefined, 'Missing date must NOT be marked in seenArticles');
+      assert.strictEqual(state.seenArticles['https://claude.com/resources/articles/bad-date'], undefined, 'Invalid date must NOT be marked in seenArticles');
+      assert.strictEqual(state.seenArticles['https://claude.com/resources/articles/future-date'], undefined, 'Future date must NOT be marked in seenArticles');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 19: First run has invalid date (unmarked), next run has corrected date (collected & marked)
+  // --------------------------------------------------------------------------
+  await runAsyncTest('fetchBlogContent retries and collects article whose date was invalid on first run but corrected on next run', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      let isFirstRun = true;
+      const correctedDate = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(); // 3 hours ago
+
+      globalThis.fetch = async (url) => {
+        const urlStr = String(url);
+        if (urlStr === 'https://claude.com/blog') {
+          return new Response(`
+            <html>
+              <body>
+                <a href="/resources/articles/eventual-fix">Eventual Fix</a>
+              </body>
+            </html>
+          `, { status: 200 });
+        }
+        if (urlStr.includes('eventual-fix')) {
+          const dateValue = isFirstRun ? "invalid-or-missing" : correctedDate;
+          return new Response(`
+            <html>
+              <head>
+                <script type="application/ld+json">
+                  {
+                    "@context": "https://schema.org",
+                    "@type": "BlogPosting",
+                    "headline": "Eventual Fix Article",
+                    "datePublished": "${dateValue}"
+                  }
+                </script>
+              </head>
+              <body>
+                <article>
+                  <h1>Eventual Fix Article</h1>
+                  <p>This article initially had an invalid date published timestamp.</p>
+                </article>
+              </body>
+            </html>
+          `, { status: 200 });
+        }
+        return new Response('Not found', { status: 404 });
+      };
+
+      const mockBlogs = [{
+        name: "Claude Blog",
+        indexUrl: "https://claude.com/blog"
+      }];
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const errors = [];
+
+      // Run 1: First run with invalid date
+      isFirstRun = true;
+      const run1Results = await fetchBlogContent(mockBlogs, state, errors);
+
+      assert.strictEqual(run1Results.length, 0, 'First run must reject article with invalid date');
+      assert.strictEqual(state.seenArticles['https://claude.com/resources/articles/eventual-fix'], undefined, 'Must NOT mark in seenArticles when date was invalid');
+
+      // Run 2: Next run after blog author/CMS fixes the date
+      isFirstRun = false;
+      const run2Results = await fetchBlogContent(mockBlogs, state, errors);
+
+      assert.strictEqual(run2Results.length, 1, 'Second run must discover and collect article once date is corrected');
+      assert.strictEqual(run2Results[0].title, 'Eventual Fix Article');
+      assert.strictEqual(run2Results[0].publishedAt, correctedDate);
+      assert(typeof state.seenArticles['https://claude.com/resources/articles/eventual-fix'] === 'number', 'Must be marked in seenArticles only after successful collection');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 20: Verify real workspace files remain 100% untouched
   // --------------------------------------------------------------------------
   runTest('Workspace root files remain 100% bitwise untouched', () => {
     for (const f of filesToTrack) {

@@ -143,6 +143,17 @@ async function main() {
     maxFeedAgeHours = val;
   }
 
+  const langArgIndex = args.indexOf('--language') !== -1 ? args.indexOf('--language') : args.indexOf('--lang');
+  let cliLanguage = null;
+  if (langArgIndex !== -1) {
+    if (langArgIndex === args.length - 1 || args[langArgIndex + 1].startsWith('--')) {
+      throw new Error('Flag --language requires a language argument (e.g. --language zh, --language en, --language bilingual).');
+    }
+    cliLanguage = args[langArgIndex + 1];
+  } else if (process.env.DIGEST_LANGUAGE) {
+    cliLanguage = process.env.DIGEST_LANGUAGE;
+  }
+
   const errors = [];
 
   // 1. Read user config
@@ -157,6 +168,9 @@ async function main() {
     } catch (err) {
       errors.push(`Could not read user config (${CONFIG_PATH}): ${err.message}`);
     }
+  }
+  if (cliLanguage) {
+    config.language = cliLanguage;
   }
 
   // 2. Load feeds (either via explicit local mode, or default remote Fork)

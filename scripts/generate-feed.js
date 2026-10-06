@@ -728,24 +728,28 @@ function parseAnthropicEngineeringIndex(html) {
   return articles;
 }
 
-// Scrapes the Claude Blog index page (claude.com/blog).
-// This is a Webflow site. We extract article links, titles, and dates
-// from the HTML structure.
+// Scrapes the Claude Blog index page (claude.com/blog and /resources/articles).
+// Matches article links under both /resources/articles/<slug> and legacy /blog/<slug>.
 function parseClaudeBlogIndex(html) {
   const articles = [];
-  const seenSlugs = new Set();
+  const seenUrls = new Set();
 
-  // Match blog post links — they follow the pattern /blog/<slug>
-  // We capture surrounding context to extract titles and dates
-  const linkRegex = /href="\/blog\/([a-z0-9-]+)"/gi;
+  // Match blog/article post links — supports both /blog/<slug> and /resources/articles/<slug>
+  const linkRegex =
+    /href="((?:https?:\/\/claude\.com)?\/(?:resources\/articles|blog)\/([a-z0-9-]+))\/?["']/gi;
   let linkMatch;
   while ((linkMatch = linkRegex.exec(html)) !== null) {
-    const slug = linkMatch[1];
-    if (seenSlugs.has(slug)) continue;
-    seenSlugs.add(slug);
+    const rawPath = linkMatch[1];
+    const fullUrl = rawPath.startsWith("http")
+      ? rawPath.replace(/\/$/, "")
+      : `https://claude.com${rawPath.startsWith("/") ? "" : "/"}${rawPath}`.replace(/\/$/, "");
+
+    if (seenUrls.has(fullUrl)) continue;
+    seenUrls.add(fullUrl);
+
     articles.push({
       title: "", // Will be filled when we fetch the article page
-      url: `https://claude.com/blog/${slug}`,
+      url: fullUrl,
       publishedAt: null,
       description: "",
     });
@@ -917,19 +921,23 @@ function extractClaudeBlogArticleContent(html) {
     }
   }
 
-  // Extract body text from the Webflow rich text container
+  // Extract body text from <article> tag or Webflow rich text container.
+  // Modern pages wrap full article in <article>, while nested <div>s can prematurely terminate w-richtext regex
+  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
   const richTextMatch =
     html.match(
       /<div[^>]*class="[^"]*u-rich-text-blog[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i,
     ) ||
     html.match(/<div[^>]*class="[^"]*w-richtext[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
 
-  const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-  const bodyHtml = richTextMatch
-    ? richTextMatch[1]
-    : articleMatch
+  const bodyHtml =
+    articleMatch && articleMatch[1].length > (richTextMatch ? richTextMatch[1].length : 0)
       ? articleMatch[1]
-      : html;
+      : richTextMatch
+        ? richTextMatch[1]
+        : articleMatch
+          ? articleMatch[1]
+          : html;
 
   content = bodyHtml
     .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -973,7 +981,9 @@ function extractClaudeBlogArticleContent(html) {
 // the results for feed-blogs.json.
 async function fetchBlogContent(blogs, state, errors) {
   const results = [];
-  const cutoff = new Date(Date.now() - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000);
+  const now = Date.now();
+  const cutoff = new Date(now - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000);
+  const futureCutoff = new Date(now + 24 * 60 * 60 * 1000); // Guard against bogus future dates
 
   for (const blog of blogs) {
     console.error(`  Processing blog: ${blog.name}...`);
@@ -999,82 +1009,133 @@ async function fetchBlogContent(blogs, state, errors) {
         candidates = parseClaudeBlogIndex(indexHtml);
       }
 
-      // Step 2: Filter to unseen articles, cap at MAX_ARTICLES_PER_BLOG.
-      // Blog index pages list articles newest-first. We only consider the
-      // first few entries (MAX_INDEX_SCAN) to avoid crawling the entire
-      // backlog on first run. Articles with a known date must fall within
-      // the lookback window; articles without dates are accepted if they
-      // appear near the top of the listing (likely recent).
-      const MAX_INDEX_SCAN = 15; // scan top recent entries to discover unseen articles
-      const newArticles = [];
-      for (const article of candidates.slice(0, MAX_INDEX_SCAN)) {
-        if (state.seenArticles[article.url]) continue; // already seen
-        // If we have a date, check it's within the lookback window
-        if (article.publishedAt && new Date(article.publishedAt) < cutoff)
-          continue;
-        newArticles.push(article);
-        if (newArticles.length >= MAX_ARTICLES_PER_BLOG) break;
-      }
+      // Step 2: Scan candidates to find up to MAX_ARTICLES_PER_BLOG qualified articles.
+      // Blog index pages list articles newest-first. We scan recent entries (MAX_INDEX_SCAN)
+      // to find up to MAX_ARTICLES_PER_BLOG articles that have valid dates falling within
+      // the lookback window. If initial candidates turn out to be older than the cutoff or
+      // already seen, scanning continues until up to 3 qualified fresh articles are found
+      // or candidates are exhausted.
+      const MAX_INDEX_SCAN = 15;
+      let qualifiedForBlog = 0;
 
-      if (newArticles.length === 0) {
-        console.error(`    No new articles found`);
-        continue;
-      }
+      for (const candidate of candidates.slice(0, MAX_INDEX_SCAN)) {
+        if (qualifiedForBlog >= MAX_ARTICLES_PER_BLOG) {
+          break;
+        }
 
-      console.error(
-        `    Found ${newArticles.length} new article(s), fetching content...`,
-      );
+        if (state.seenArticles[candidate.url]) {
+          continue; // already seen
+        }
 
-      // Step 3: Fetch full article content for each new article
-      for (const article of newArticles) {
+        // If candidate already has an authoritative date from index, check if older than cutoff
+        if (candidate.publishedAt) {
+          const indexDate = new Date(candidate.publishedAt);
+          if (!isNaN(indexDate.getTime()) && indexDate < cutoff) {
+            // Already known to be older than cutoff; mark as seen to avoid re-examining
+            state.seenArticles[candidate.url] = Date.now();
+            continue;
+          }
+        }
+
+        // Fetch full article page
         try {
-          // Fetch the full article page
-          const articleRes = await fetch(article.url, {
+          const articleRes = await fetch(candidate.url, {
             headers: { "User-Agent": "FollowBuilders/1.0 (feed aggregator)" },
           });
           if (!articleRes.ok) {
             errors.push(
-              `Blog: Failed to fetch article ${article.url}: HTTP ${articleRes.status}`,
+              `Blog: Failed to fetch article ${candidate.url}: HTTP ${articleRes.status}`,
             );
             continue;
           }
           const articleHtml = await articleRes.text();
 
-          // Use the right content extractor based on the blog
+          // Use the right content extractor based on the blog or article URL
           let extracted;
-          if (article.url.includes("anthropic.com/engineering")) {
+          if (
+            candidate.url.includes("anthropic.com/engineering") ||
+            blog.name.toLowerCase().includes("anthropic")
+          ) {
             extracted = extractAnthropicArticleContent(articleHtml);
-          } else if (article.url.includes("claude.com/blog")) {
+          } else if (
+            candidate.url.includes("claude.com") ||
+            blog.name.toLowerCase().includes("claude")
+          ) {
             extracted = extractClaudeBlogArticleContent(articleHtml);
           }
 
           if (!extracted || !extracted.content) {
-            errors.push(`Blog: No content extracted from ${article.url}`);
+            errors.push(`Blog: No content extracted from ${candidate.url}`);
             continue;
           }
 
-          // Merge extracted data with what we already have from the index
+          // Validate publication date:
+          // Must be present, valid, within the lookback window, and not in the future.
+          // Articles with missing, invalid, or far-future dates are NOT marked in seenArticles,
+          // allowing subsequent runs to discover them once corrected.
+          const finalPublishedAt = extracted.publishedAt || candidate.publishedAt;
+          if (!finalPublishedAt) {
+            console.error(
+              `    Skipping ${candidate.url}: missing publication date (will retry on next run)`,
+            );
+            continue;
+          }
+
+          const pubDate = new Date(finalPublishedAt);
+          if (isNaN(pubDate.getTime())) {
+            console.error(
+              `    Skipping ${candidate.url}: invalid publication date "${finalPublishedAt}" (will retry on next run)`,
+            );
+            continue;
+          }
+
+          if (pubDate > futureCutoff) {
+            console.error(
+              `    Skipping ${candidate.url}: published at ${pubDate.toISOString()} is in the future (will retry on next run)`,
+            );
+            continue;
+          }
+
+          if (pubDate < cutoff) {
+            console.error(
+              `    Skipping ${candidate.url}: published at ${pubDate.toISOString()} is older than cutoff ${cutoff.toISOString()}`,
+            );
+            // Valid historical article: mark as seen so we do not re-fetch on future runs
+            state.seenArticles[candidate.url] = Date.now();
+            continue;
+          }
+
+          // Fresh, qualified article: include in feed and mark as seen
           results.push({
             source: "blog",
             name: blog.name,
-            title: extracted.title || article.title || "Untitled",
-            url: article.url,
-            publishedAt: extracted.publishedAt || article.publishedAt || null,
+            title: extracted.title || candidate.title || "Untitled",
+            url: candidate.url,
+            publishedAt: extracted.publishedAt || candidate.publishedAt,
             author: extracted.author || "",
-            description: article.description || "",
+            description: candidate.description || "",
             content: extracted.content,
           });
 
-          // Mark as seen
-          state.seenArticles[article.url] = Date.now();
+          // Mark candidate as seen only after confirming qualification and inclusion
+          state.seenArticles[candidate.url] = Date.now();
+          qualifiedForBlog++;
 
           // Small delay between article fetches to be polite
           await new Promise((r) => setTimeout(r, 500));
         } catch (err) {
           errors.push(
-            `Blog: Error fetching article ${article.url}: ${err.message}`,
+            `Blog: Error fetching article ${candidate.url}: ${err.message}`,
           );
         }
+      }
+
+      if (qualifiedForBlog === 0) {
+        console.error(`    No new articles found`);
+      } else {
+        console.error(
+          `    Found ${qualifiedForBlog} qualified new article(s)`,
+        );
       }
     } catch (err) {
       errors.push(`Blog: Error processing ${blog.name}: ${err.message}`);

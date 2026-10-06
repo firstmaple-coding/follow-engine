@@ -989,6 +989,28 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     }
   });
 
+  // --- 21. CLI --language flag sets config.language and enforces translate prompt ---
+  testCase('CLI --language zh sets config.language and requires translate prompt when updates exist', () => {
+    const testDir = join(ISOLATED_HOME_DIR, 'test-lang-cli');
+    mkdirSync(testDir, { recursive: true });
+    try {
+      const freshDate = new Date().toISOString();
+      writeFileSync(join(testDir, 'feed-blogs.json'), JSON.stringify({
+        generatedAt: freshDate,
+        blogs: [{ source: 'blog', name: 'Blog', title: 'Post', url: 'https://example.com/post', content: 'Text' }]
+      }), 'utf-8');
+
+      const res = runChild('default', ['--local', '--feed-dir', testDir, '--blogs-only', '--language', 'zh']);
+      assert.strictEqual(res.status, 0, `Expected exit 0, got ${res.status}: ${res.stderr}`);
+      const data = JSON.parse(res.stdout);
+      assert.strictEqual(data.status, 'ok');
+      assert.strictEqual(data.config.language, 'zh', 'config.language must be set to zh');
+      assert(data.prompts.translate, 'translate prompt must be loaded when language is zh and updates exist');
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   // Cleanup isolated home directory
   try {
     rmSync(ISOLATED_HOME_DIR, { recursive: true, force: true });
