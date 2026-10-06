@@ -1011,6 +1011,32 @@ if (process.env.__PREPARE_DIGEST_MOCK_PRELOAD__ === '1') {
     }
   });
 
+  // --- 22. Invalid language parameters throw error and exit 1 ---
+  testCase('Invalid --language CLI flag or DIGEST_LANGUAGE env value exits 1 with error', () => {
+    const testDir = join(ISOLATED_HOME_DIR, 'test-lang-invalid');
+    mkdirSync(testDir, { recursive: true });
+    try {
+      // 1. Invalid CLI flag
+      const resCli = runChild('default', ['--local', '--feed-dir', testDir, '--blogs-only', '--language', 'nonsense']);
+      assert.strictEqual(resCli.status, 1, 'Expected exit 1 for invalid CLI language');
+      assert(resCli.stderr.includes('Invalid --language value') && resCli.stderr.includes('nonsense'), `Expected invalid language error: ${resCli.stderr}`);
+
+      // 2. Missing CLI argument for --language
+      const resMissing = runChild('default', ['--local', '--feed-dir', testDir, '--blogs-only', '--language']);
+      assert.strictEqual(resMissing.status, 1, 'Expected exit 1 for missing language argument');
+      assert(resMissing.stderr.includes('Flag --language requires a language argument'), `Expected missing arg error: ${resMissing.stderr}`);
+
+      // 3. Invalid environment variable DIGEST_LANGUAGE
+      const resEnv = runChild('default', ['--local', '--feed-dir', testDir, '--blogs-only'], {
+        DIGEST_LANGUAGE: 'unknown_lang'
+      });
+      assert.strictEqual(resEnv.status, 1, 'Expected exit 1 for invalid DIGEST_LANGUAGE env');
+      assert(resEnv.stderr.includes('Invalid DIGEST_LANGUAGE environment value') && resEnv.stderr.includes('unknown_lang'), `Expected invalid env error: ${resEnv.stderr}`);
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   // Cleanup isolated home directory
   try {
     rmSync(ISOLATED_HOME_DIR, { recursive: true, force: true });
