@@ -45,6 +45,13 @@
       "indexUrl": "https://claude.com/blog",
       "articleBaseUrl": "https://claude.com/blog/",
       "fetchMethod": "http"
+    },
+    {
+      "name": "GitHub Engineering",
+      "type": "rss-fulltext",
+      "indexUrl": "https://github.blog/engineering/feed/",
+      "articleBaseUrl": "https://github.blog/",
+      "fetchMethod": "http"
     }
   ],
   "x_accounts": [
