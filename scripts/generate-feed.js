@@ -45,18 +45,41 @@ const STATE_PATH = join(SCRIPT_DIR, "..", "state-feed.json");
 // Tracks which tweet IDs and video IDs we've already included in feeds
 // so we never send the same content twice across runs.
 
-async function loadState() {
-  if (!existsSync(STATE_PATH)) {
+async function loadState(statePath = STATE_PATH) {
+  if (!existsSync(statePath)) {
     return { seenTweets: {}, seenVideos: {}, seenArticles: {} };
   }
   try {
-    const state = JSON.parse(await readFile(STATE_PATH, "utf-8"));
+    const state = JSON.parse(await readFile(statePath, "utf-8"));
     // Ensure seenArticles exists for older state files
     if (!state.seenArticles) state.seenArticles = {};
     return state;
   } catch {
     return { seenTweets: {}, seenVideos: {}, seenArticles: {} };
   }
+}
+
+function mergeBlogPosts(
+  newPosts = [],
+  existingPosts = [],
+  cutoffMs = Date.now() - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000,
+  nowMs = Date.now(),
+) {
+  const stillFreshExisting = (existingPosts || []).filter((item) => {
+    if (!item || !item.url) return false;
+    const pubDate = item.publishedAt ? new Date(item.publishedAt).getTime() : NaN;
+    return !isNaN(pubDate) && pubDate >= cutoffMs && pubDate <= nowMs;
+  });
+
+  const seenUrls = new Set((newPosts || []).map((b) => b.url));
+  const merged = [...(newPosts || [])];
+  for (const item of stillFreshExisting) {
+    if (!seenUrls.has(item.url)) {
+      seenUrls.add(item.url);
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 async function saveState(
@@ -981,6 +1004,7 @@ function extractClaudeBlogArticleContent(html) {
 // the results for feed-blogs.json.
 async function fetchBlogContent(blogs, state, errors) {
   const results = [];
+  let successfulSources = 0;
   const now = Date.now();
   const cutoff = new Date(now - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000);
   const futureCutoff = new Date(now + 24 * 60 * 60 * 1000); // Guard against bogus future dates
@@ -1009,6 +1033,14 @@ async function fetchBlogContent(blogs, state, errors) {
         candidates = parseClaudeBlogIndex(indexHtml);
       }
 
+      if (!candidates || candidates.length === 0) {
+        errors.push(
+          `Blog: No article candidates discovered for ${blog.name} (possible site structure change or empty response)`,
+        );
+        console.error(`    No candidates discovered from index for ${blog.name}`);
+        continue;
+      }
+
       // Step 2: Scan candidates to find up to MAX_ARTICLES_PER_BLOG qualified articles.
       // Blog index pages list articles newest-first. We scan recent entries (MAX_INDEX_SCAN)
       // to find up to MAX_ARTICLES_PER_BLOG articles that have valid dates falling within
@@ -1016,6 +1048,8 @@ async function fetchBlogContent(blogs, state, errors) {
       // already seen, scanning continues until up to 3 qualified fresh articles are found
       // or candidates are exhausted.
       const MAX_INDEX_SCAN = 15;
+      let attemptedArticleFetches = 0;
+      let failedArticleFetches = 0;
       let qualifiedForBlog = 0;
 
       for (const candidate of candidates.slice(0, MAX_INDEX_SCAN)) {
@@ -1038,11 +1072,13 @@ async function fetchBlogContent(blogs, state, errors) {
         }
 
         // Fetch full article page
+        attemptedArticleFetches++;
         try {
           const articleRes = await fetch(candidate.url, {
             headers: { "User-Agent": "FollowBuilders/1.0 (feed aggregator)" },
           });
           if (!articleRes.ok) {
+            failedArticleFetches++;
             errors.push(
               `Blog: Failed to fetch article ${candidate.url}: HTTP ${articleRes.status}`,
             );
@@ -1065,6 +1101,7 @@ async function fetchBlogContent(blogs, state, errors) {
           }
 
           if (!extracted || !extracted.content) {
+            failedArticleFetches++;
             errors.push(`Blog: No content extracted from ${candidate.url}`);
             continue;
           }
@@ -1124,10 +1161,18 @@ async function fetchBlogContent(blogs, state, errors) {
           // Small delay between article fetches to be polite
           await new Promise((r) => setTimeout(r, 500));
         } catch (err) {
+          failedArticleFetches++;
           errors.push(
             `Blog: Error fetching article ${candidate.url}: ${err.message}`,
           );
         }
+      }
+
+      if (attemptedArticleFetches > 0 && failedArticleFetches === attemptedArticleFetches) {
+        console.error(
+          `    All ${attemptedArticleFetches} candidate article(s) failed to fetch for ${blog.name}`,
+        );
+        continue;
       }
 
       if (qualifiedForBlog === 0) {
@@ -1137,11 +1182,14 @@ async function fetchBlogContent(blogs, state, errors) {
           `    Found ${qualifiedForBlog} qualified new article(s)`,
         );
       }
+      successfulSources++;
     } catch (err) {
       errors.push(`Blog: Error processing ${blog.name}: ${err.message}`);
     }
   }
 
+  results.successfulSources = successfulSources;
+  results.totalSources = blogs.length;
   return results;
 }
 
@@ -1153,6 +1201,18 @@ async function main() {
   const tweetsOnly = args.includes("--tweets-only");
   const podcastsOnly = args.includes("--podcasts-only");
   const blogsOnly = args.includes("--blogs-only");
+
+  const feedDirIndex = args.indexOf("--feed-dir");
+  let feedDir = join(SCRIPT_DIR, "..");
+  if (
+    feedDirIndex !== -1 &&
+    feedDirIndex + 1 < args.length &&
+    !args[feedDirIndex + 1].startsWith("--")
+  ) {
+    feedDir = args[feedDirIndex + 1];
+  } else if (process.env.FEED_DIR) {
+    feedDir = process.env.FEED_DIR;
+  }
 
   if (dryRun) {
     console.error(
@@ -1179,7 +1239,8 @@ async function main() {
   }
 
   const sources = await loadSources();
-  const state = await loadState();
+  const statePath = join(feedDir, "state-feed.json");
+  const state = await loadState(statePath);
   const errors = [];
 
   // Fetch tweets
@@ -1222,7 +1283,7 @@ async function main() {
       );
     } else {
       await writeFile(
-        join(SCRIPT_DIR, "..", "feed-x.json"),
+        join(feedDir, "feed-x.json"),
         JSON.stringify(xFeed, null, 2),
       );
       console.error(
@@ -1258,7 +1319,7 @@ async function main() {
       );
     } else {
       await writeFile(
-        join(SCRIPT_DIR, "..", "feed-podcasts.json"),
+        join(feedDir, "feed-podcasts.json"),
         JSON.stringify(podcastFeed, null, 2),
       );
       console.error(`  feed-podcasts.json: ${podcasts.length} episodes`);
@@ -1271,11 +1332,46 @@ async function main() {
     const blogContent = await fetchBlogContent(sources.blogs, state, errors);
     console.error(`  Found ${blogContent.length} new blog post(s)`);
 
+    const blogErrors = errors.filter((e) => e.startsWith("Blog"));
+    const allSourcesFailed =
+      sources.blogs.length > 0 && blogContent.successfulSources === 0;
+
+    if (allSourcesFailed) {
+      throw new Error(
+        `Blog feed failed: all ${sources.blogs.length} blog source(s) failed to fetch (${blogErrors.length} error(s) occurred):\n` +
+          blogErrors.map((e) => `  - ${e}`).join("\n"),
+      );
+    }
+
+    // Retain existing fresh articles from feed-blogs.json so repeat runs on the same day
+    // (when newly fetched articles are 0 due to dedup) do not wipe out valid feeds.
+    const feedBlogsPath = join(feedDir, "feed-blogs.json");
+    let existingBlogs = [];
+    if (existsSync(feedBlogsPath)) {
+      try {
+        const existingData = JSON.parse(await readFile(feedBlogsPath, "utf-8"));
+        if (Array.isArray(existingData.blogs)) {
+          existingBlogs = existingData.blogs;
+        }
+      } catch {
+        // Ignore unreadable/corrupted feed file
+      }
+    }
+
+    const now = Date.now();
+    const blogCutoff = now - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000;
+    const mergedBlogs = mergeBlogPosts(
+      blogContent,
+      existingBlogs,
+      blogCutoff,
+      now,
+    );
+
     const blogFeed = {
       generatedAt: new Date().toISOString(),
       lookbackHours: BLOG_LOOKBACK_HOURS,
-      blogs: blogContent,
-      stats: { blogPosts: blogContent.length },
+      blogs: mergedBlogs,
+      stats: { blogPosts: mergedBlogs.length },
       errors:
         errors.filter((e) => e.startsWith("Blog")).length > 0
           ? errors.filter((e) => e.startsWith("Blog"))
@@ -1283,14 +1379,16 @@ async function main() {
     };
     if (dryRun) {
       console.error(
-        `[dry-run] feed-blogs.json: ${blogContent.length} posts (skipped write)`,
+        `[dry-run] feed-blogs.json: ${mergedBlogs.length} posts (${blogContent.length} new, ${mergedBlogs.length - blogContent.length} retained) (skipped write)`,
       );
     } else {
       await writeFile(
-        join(SCRIPT_DIR, "..", "feed-blogs.json"),
+        feedBlogsPath,
         JSON.stringify(blogFeed, null, 2),
       );
-      console.error(`  feed-blogs.json: ${blogContent.length} posts`);
+      console.error(
+        `  feed-blogs.json: ${mergedBlogs.length} posts (${blogContent.length} new, ${mergedBlogs.length - blogContent.length} retained)`,
+      );
     }
   }
 
@@ -1300,11 +1398,15 @@ async function main() {
       "[dry-run] state-feed.json: skipped updating state in dry-run mode",
     );
   } else {
-    await saveState(state, {
-      tweets: runTweets,
-      podcasts: runPodcasts,
-      blogs: runBlogs,
-    });
+    await saveState(
+      state,
+      {
+        tweets: runTweets,
+        podcasts: runPodcasts,
+        blogs: runBlogs,
+      },
+      statePath,
+    );
   }
 
   if (errors.length > 0) {
@@ -1327,6 +1429,7 @@ export {
   main,
   saveState,
   loadState,
+  mergeBlogPosts,
   fetchPodcastContent,
   fetchPod2txtTranscript,
   fetchXContent,
