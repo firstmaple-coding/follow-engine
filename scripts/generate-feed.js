@@ -1033,6 +1033,14 @@ async function fetchBlogContent(blogs, state, errors) {
         candidates = parseClaudeBlogIndex(indexHtml);
       }
 
+      if (!candidates || candidates.length === 0) {
+        errors.push(
+          `Blog: No article candidates discovered for ${blog.name} (possible site structure change or empty response)`,
+        );
+        console.error(`    No candidates discovered from index for ${blog.name}`);
+        continue;
+      }
+
       // Step 2: Scan candidates to find up to MAX_ARTICLES_PER_BLOG qualified articles.
       // Blog index pages list articles newest-first. We scan recent entries (MAX_INDEX_SCAN)
       // to find up to MAX_ARTICLES_PER_BLOG articles that have valid dates falling within
@@ -1040,6 +1048,8 @@ async function fetchBlogContent(blogs, state, errors) {
       // already seen, scanning continues until up to 3 qualified fresh articles are found
       // or candidates are exhausted.
       const MAX_INDEX_SCAN = 15;
+      let attemptedArticleFetches = 0;
+      let failedArticleFetches = 0;
       let qualifiedForBlog = 0;
 
       for (const candidate of candidates.slice(0, MAX_INDEX_SCAN)) {
@@ -1062,11 +1072,13 @@ async function fetchBlogContent(blogs, state, errors) {
         }
 
         // Fetch full article page
+        attemptedArticleFetches++;
         try {
           const articleRes = await fetch(candidate.url, {
             headers: { "User-Agent": "FollowBuilders/1.0 (feed aggregator)" },
           });
           if (!articleRes.ok) {
+            failedArticleFetches++;
             errors.push(
               `Blog: Failed to fetch article ${candidate.url}: HTTP ${articleRes.status}`,
             );
@@ -1089,6 +1101,7 @@ async function fetchBlogContent(blogs, state, errors) {
           }
 
           if (!extracted || !extracted.content) {
+            failedArticleFetches++;
             errors.push(`Blog: No content extracted from ${candidate.url}`);
             continue;
           }
@@ -1148,10 +1161,18 @@ async function fetchBlogContent(blogs, state, errors) {
           // Small delay between article fetches to be polite
           await new Promise((r) => setTimeout(r, 500));
         } catch (err) {
+          failedArticleFetches++;
           errors.push(
             `Blog: Error fetching article ${candidate.url}: ${err.message}`,
           );
         }
+      }
+
+      if (attemptedArticleFetches > 0 && failedArticleFetches === attemptedArticleFetches) {
+        console.error(
+          `    All ${attemptedArticleFetches} candidate article(s) failed to fetch for ${blog.name}`,
+        );
+        continue;
       }
 
       if (qualifiedForBlog === 0) {
@@ -1317,7 +1338,8 @@ async function main() {
 
     if (allSourcesFailed) {
       throw new Error(
-        `Blog feed failed: all ${sources.blogs.length} blog source(s) failed to fetch (${blogErrors.length} error(s) occurred)`,
+        `Blog feed failed: all ${sources.blogs.length} blog source(s) failed to fetch (${blogErrors.length} error(s) occurred):\n` +
+          blogErrors.map((e) => `  - ${e}`).join("\n"),
       );
     }
 

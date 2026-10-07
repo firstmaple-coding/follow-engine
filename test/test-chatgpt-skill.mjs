@@ -81,6 +81,8 @@ async function runAllTests() {
     assert(content.includes('何时重新抓取'), 'Must document when to refetch');
     assert(content.includes('抓取失败处理'), 'Must document failure handling');
     assert(content.includes('严防误报最新'), 'Must forbid falsely claiming stale cache is freshly verified');
+    assert(content.includes('不完整'), 'Must document that scraping errors lead to disclosure of incomplete results');
+    assert(content.includes('透明披露') || content.includes('抓取异常主动披露'), 'Must instruct transparent disclosure of partial crawl issues');
   });
 
   // 4. Preservation of root SKILL.md
@@ -402,6 +404,183 @@ async function runAllTests() {
         feedContentAfterFail.generatedAt,
         originalGeneratedAt,
         'generatedAt must NOT be bumped to now when sources fail'
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // 9. Boundary: 200 OK index with 0 candidates or 100% failing article details does not count as success
+  await testCase('Boundary test: sources returning 0 candidates or failing all article details are treated as failed sources', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'fe-test-chatgpt-boundary-'));
+    const genScript = join(REPO_ROOT, 'scripts', 'generate-feed.js');
+
+    const originalGeneratedAt = '2026-10-06T10:00:00.000Z';
+    const initialFeed = {
+      generatedAt: originalGeneratedAt,
+      lookbackHours: 72,
+      blogs: [
+        {
+          source: 'blog',
+          name: 'Anthropic Engineering',
+          title: 'Existing Earlier Article',
+          url: 'https://www.anthropic.com/engineering/earlier-art',
+          publishedAt: '2026-10-06T09:00:00.000Z',
+          content: 'Earlier content'
+        }
+      ],
+      stats: { blogPosts: 1 }
+    };
+    const feedBlogsPath = join(tempDir, 'feed-blogs.json');
+    writeFileSync(feedBlogsPath, JSON.stringify(initialFeed, null, 2), 'utf-8');
+    const hashBefore = sha256(feedBlogsPath);
+
+    try {
+      // Mock network module where:
+      // - Anthropic Engineering index returns 200 OK but HTML contains 0 candidates
+      // - Claude Blog index returns 200 OK with candidates, but all article detail fetches fail (HTTP 500)
+      const mockBoundaryPath = join(tempDir, 'mock-boundary.mjs');
+      const mockBoundaryContent = [
+        'const claudeIndex = `<html><body>',
+        '  <a href="/resources/articles/fail-art-1">Fail Art 1</a>',
+        '  <a href="/resources/articles/fail-art-2">Fail Art 2</a>',
+        '</body></html>`;',
+        'globalThis.fetch = async (url) => {',
+        '  const s = String(url);',
+        '  if (s.includes("anthropic.com/engineering")) {',
+        '    // Returns 200 OK, but parser finds 0 candidates',
+        '    return new Response("<html><body>No posts here</body></html>", { status: 200, headers: { "Content-Type": "text/html" } });',
+        '  }',
+        '  if (s.includes("claude.com/blog") || s.includes("claude.com/resources/articles")) {',
+        '    if (s.includes("fail-art-")) {',
+        '      // Article details fail with HTTP 500',
+        '      return new Response("Internal Server Error", { status: 500 });',
+        '    }',
+        '    return new Response(claudeIndex, { status: 200, headers: { "Content-Type": "text/html" } });',
+        '  }',
+        '  return new Response("Not Found", { status: 404 });',
+        '};'
+      ].join('\n');
+      writeFileSync(mockBoundaryPath, mockBoundaryContent, 'utf-8');
+
+      const runBoundary = spawnSync(process.execPath, [
+        '--import',
+        pathToFileURL(mockBoundaryPath).href,
+        genScript,
+        '--blogs-only',
+        '--feed-dir',
+        tempDir
+      ], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8'
+      });
+
+      // Must exit with error status (non-zero) because all sources failed
+      assert.notStrictEqual(runBoundary.status, 0, 'Must exit with non-zero code when all sources fail candidate discovery or detail fetches');
+      assert(
+        runBoundary.stderr.includes('Blog feed failed: all') || runBoundary.stderr.includes('failed to fetch'),
+        `Expected failure message in stderr, got: ${runBoundary.stderr}`
+      );
+      assert(
+        runBoundary.stderr.includes('No article candidates discovered for Anthropic Engineering'),
+        'Must log 0 candidates discovered error for Anthropic'
+      );
+      assert(
+        runBoundary.stderr.includes('candidate article(s) failed to fetch for Claude Blog') ||
+        runBoundary.stderr.includes('Failed to fetch article'),
+        'Must log article detail fetch failures for Claude Blog'
+      );
+
+      // feed-blogs.json must NOT have been updated or overwritten with a false new generatedAt
+      const hashAfter = sha256(feedBlogsPath);
+      assert.strictEqual(hashAfter, hashBefore, 'feed-blogs.json must NOT be touched when all sources fail');
+
+      const feedContentAfter = JSON.parse(readFileSync(feedBlogsPath, 'utf-8'));
+      assert.strictEqual(
+        feedContentAfter.generatedAt,
+        originalGeneratedAt,
+        'generatedAt must NOT be bumped to now when sources fail'
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // 10. Partial crawl failure: 1 blog source succeeds while 1 blog fails -> feed succeeds, prepare-digest exposes diagnostic errors
+  await testCase('Partial crawl failure: feed succeeds with available articles and records errors for downstream warning', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'fe-test-chatgpt-partial-'));
+    const genScript = join(REPO_ROOT, 'scripts', 'generate-feed.js');
+    const prepScript = join(REPO_ROOT, 'scripts', 'prepare-digest.js');
+
+    try {
+      const nowIso = new Date().toISOString();
+      const articleHtml = `<html><head><script type="application/ld+json">{"@type":"BlogPosting","headline":"Partial Test Article","datePublished":"${nowIso}","author":{"name":"Team"}}</script></head><body><div class="w-richtext">Content for partial test.</div></body></html>`;
+      const claudeIndex = `<html><body><a href="/resources/articles/partial-art-1">Partial Art 1</a></body></html>`;
+
+      const mockPartialPath = join(tempDir, 'mock-partial.mjs');
+      const mockPartialContent = [
+        'globalThis.fetch = async (url) => {',
+        '  const s = String(url);',
+        '  if (s.includes("anthropic.com/engineering")) {',
+        '    // Anthropic returns empty candidates (failed source)',
+        '    return new Response("<html><body>Empty</body></html>", { status: 200, headers: { "Content-Type": "text/html" } });',
+        '  }',
+        '  if (s.includes("claude.com/resources/articles/partial-art-1")) {',
+        '    // Claude article detail succeeds',
+        `    return new Response(${JSON.stringify(articleHtml)}, { status: 200, headers: { "Content-Type": "text/html" } });`,
+        '  }',
+        '  if (s.includes("claude.com")) {',
+        '    // Claude index succeeds',
+        `    return new Response(${JSON.stringify(claudeIndex)}, { status: 200, headers: { "Content-Type": "text/html" } });`,
+        '  }',
+        '  return new Response("Not Found", { status: 404 });',
+        '};'
+      ].join('\n');
+      writeFileSync(mockPartialPath, mockPartialContent, 'utf-8');
+
+      const runGen = spawnSync(process.execPath, [
+        '--import',
+        pathToFileURL(mockPartialPath).href,
+        genScript,
+        '--blogs-only',
+        '--feed-dir',
+        tempDir
+      ], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8'
+      });
+
+      assert.strictEqual(runGen.status, 0, `Partial run should succeed with code 0: ${runGen.stderr}`);
+      const feedData = JSON.parse(readFileSync(join(tempDir, 'feed-blogs.json'), 'utf-8'));
+      assert.strictEqual(feedData.stats.blogPosts, 1, 'Should include the 1 article from successful Claude Blog');
+      assert(
+        feedData.errors && feedData.errors.some(e => e.includes('Anthropic Engineering')),
+        'feed-blogs.json must record error for failed Anthropic Engineering source'
+      );
+
+      // Now run prepare-digest and verify errors are passed to output JSON for Skill to detect
+      const prepRes = spawnSync(process.execPath, [
+        prepScript,
+        '--local',
+        '--feed-dir',
+        tempDir,
+        '--blogs-only',
+        '--max-feed-age-hours',
+        '24',
+        '--language',
+        'zh'
+      ], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8'
+      });
+
+      assert.strictEqual(prepRes.status, 0, `prepare-digest must succeed: ${prepRes.stderr}`);
+      const prepData = JSON.parse(prepRes.stdout);
+      assert.strictEqual(prepData.status, 'ok');
+      assert.strictEqual(prepData.stats.blogPosts, 1);
+      assert(
+        prepData.errors && prepData.errors.some(e => e.includes('Anthropic Engineering')),
+        'prepare-digest must expose the blog source error so Skill can notify user of incomplete result'
       );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
