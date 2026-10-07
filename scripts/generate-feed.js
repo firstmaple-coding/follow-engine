@@ -1004,6 +1004,7 @@ function extractClaudeBlogArticleContent(html) {
 // the results for feed-blogs.json.
 async function fetchBlogContent(blogs, state, errors) {
   const results = [];
+  let successfulSources = 0;
   const now = Date.now();
   const cutoff = new Date(now - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000);
   const futureCutoff = new Date(now + 24 * 60 * 60 * 1000); // Guard against bogus future dates
@@ -1160,11 +1161,14 @@ async function fetchBlogContent(blogs, state, errors) {
           `    Found ${qualifiedForBlog} qualified new article(s)`,
         );
       }
+      successfulSources++;
     } catch (err) {
       errors.push(`Blog: Error processing ${blog.name}: ${err.message}`);
     }
   }
 
+  results.successfulSources = successfulSources;
+  results.totalSources = blogs.length;
   return results;
 }
 
@@ -1306,6 +1310,16 @@ async function main() {
     console.error("Fetching blog content...");
     const blogContent = await fetchBlogContent(sources.blogs, state, errors);
     console.error(`  Found ${blogContent.length} new blog post(s)`);
+
+    const blogErrors = errors.filter((e) => e.startsWith("Blog"));
+    const allSourcesFailed =
+      sources.blogs.length > 0 && blogContent.successfulSources === 0;
+
+    if (allSourcesFailed) {
+      throw new Error(
+        `Blog feed failed: all ${sources.blogs.length} blog source(s) failed to fetch (${blogErrors.length} error(s) occurred)`,
+      );
+    }
 
     // Retain existing fresh articles from feed-blogs.json so repeat runs on the same day
     // (when newly fetched articles are 0 due to dedup) do not wipe out valid feeds.
