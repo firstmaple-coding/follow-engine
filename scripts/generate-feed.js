@@ -830,6 +830,45 @@ function parseFullTextBlogRss(xml, blog, errors = []) {
   return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 }
 
+// RSS index with dates and original links; the article page supplies the body.
+function parseBlogRssIndex(xml, blog, errors = []) {
+  const articles = [];
+  const seenUrls = new Set();
+  const expectedHost = new URL(blog.articleBaseUrl).hostname;
+  const field = (block, tag) => (block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i"))?.[1] || "")
+    .replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "").trim();
+
+  for (const match of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const block = match[1];
+    const rawLink = decodeHtmlEntities(field(block, "link"));
+    let url;
+    try {
+      url = new URL(rawLink);
+    } catch {
+      errors.push(`Blog: Invalid RSS article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+    if (url.protocol !== "https:" || url.hostname !== expectedHost) {
+      errors.push(`Blog: Unexpected RSS article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+    if (seenUrls.has(url.href)) continue;
+    seenUrls.add(url.href);
+    const publishedAt = field(block, "pubDate");
+    if (!publishedAt || Number.isNaN(new Date(publishedAt).getTime())) {
+      errors.push(`Blog: Missing or invalid RSS publication date for ${url.href}`);
+      continue;
+    }
+    articles.push({
+      title: decodeHtmlEntities(field(block, "title")),
+      url: url.href,
+      publishedAt,
+      description: decodeHtmlEntities(field(block, "description")).replace(/<[^>]+>/g, " ").trim(),
+    });
+  }
+  return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+}
+
 function decodeHtmlEntities(str) {
   if (!str || typeof str !== 'string') return str || '';
   return str
@@ -854,6 +893,55 @@ function decodeHtmlEntities(str) {
       return value <= 0x10ffff ? String.fromCodePoint(value) : match;
     })
     .trim();
+}
+
+// Google Blog exposes article metadata in JSON-LD and the body in a dedicated
+// container. Stop at that container's matching div to exclude related stories.
+function extractGoogleBlogArticleContent(html) {
+  let metadata;
+  for (const match of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const value = JSON.parse(match[1]);
+      if (["Article", "BlogPosting", "NewsArticle"].includes(value["@type"])) {
+        metadata = value;
+        break;
+      }
+    } catch {
+      // Ignore unrelated or malformed structured-data blocks.
+    }
+  }
+  const opening = /<div\b[^>]*data-component="uni-article-body"[^>]*>/i.exec(html);
+  if (!metadata || !opening) return null;
+  const divTag = /<\/?div\b[^>]*>/gi;
+  divTag.lastIndex = opening.index;
+  let depth = 0;
+  let end = -1;
+  for (const tag of html.matchAll(divTag)) {
+    if (tag[0].startsWith("</")) depth--;
+    else depth++;
+    if (depth === 0) {
+      end = tag.index;
+      break;
+    }
+  }
+  if (end < 0) return null;
+  let bodyHtml = html.slice(opening.index + opening[0].length, end);
+  const newsletterStart = bodyHtml.search(/<script[^>]*data-catalog-id="newsletter-form"/i);
+  if (newsletterStart >= 0) bodyHtml = bodyHtml.slice(0, newsletterStart);
+  const content = decodeHtmlEntities(bodyHtml
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " "));
+  return {
+    title: decodeHtmlEntities(metadata.headline || ""),
+    author: typeof metadata.author === "string" ? metadata.author : metadata.author?.name || "",
+    publishedAt: metadata.datePublished || null,
+    canonicalUrl: metadata.mainEntityOfPage || null,
+    content,
+  };
 }
 
 // Extracts the main text content from an Anthropic Engineering article page.
@@ -1078,7 +1166,7 @@ async function fetchBlogContent(blogs, state, errors) {
     try {
       // Step 1: Discover articles from the blog index page
       const indexRes = await fetch(blog.indexUrl, {
-        headers: { "User-Agent": blog.type === "rss-fulltext" ? RSS_USER_AGENT : "FollowBuilders/1.0 (feed aggregator)" },
+        headers: { "User-Agent": blog.type?.startsWith("rss-") ? RSS_USER_AGENT : "FollowBuilders/1.0 (feed aggregator)" },
       });
       if (!indexRes.ok) {
         errors.push(
@@ -1091,6 +1179,8 @@ async function fetchBlogContent(blogs, state, errors) {
       // Use the right parser based on which blog this is
       if (blog.type === "rss-fulltext") {
         candidates = parseFullTextBlogRss(indexHtml, blog, errors);
+      } else if (blog.type === "rss-detail") {
+        candidates = parseBlogRssIndex(indexHtml, blog, errors);
       } else if (blog.indexUrl.includes("anthropic.com")) {
         candidates = parseAnthropicEngineeringIndex(indexHtml);
       } else if (blog.indexUrl.includes("claude.com")) {
@@ -1158,6 +1248,13 @@ async function fetchBlogContent(blogs, state, errors) {
               blog.name.toLowerCase().includes("anthropic")
             ) {
               extracted = extractAnthropicArticleContent(articleHtml);
+            } else if (blog.type === "rss-detail" && blog.detailFormat === "google-blog") {
+              extracted = extractGoogleBlogArticleContent(articleHtml);
+              if (extracted && extracted.canonicalUrl !== candidate.url) {
+                failedArticleFetches++;
+                errors.push(`Blog: Google article canonical URL mismatch for ${candidate.url}`);
+                continue;
+              }
             } else if (
               candidate.url.includes("claude.com") ||
               blog.name.toLowerCase().includes("claude")
@@ -1166,7 +1263,7 @@ async function fetchBlogContent(blogs, state, errors) {
             }
           }
 
-          if (!extracted || !extracted.content) {
+          if (!extracted || !extracted.content || (blog.type === "rss-detail" && extracted.content.length < 200)) {
             failedArticleFetches++;
             errors.push(`Blog: No content extracted from ${candidate.url}`);
             continue;
@@ -1510,4 +1607,6 @@ export {
   parseAnthropicEngineeringIndex,
   parseClaudeBlogIndex,
   parseFullTextBlogRss,
+  parseBlogRssIndex,
+  extractGoogleBlogArticleContent,
 };
