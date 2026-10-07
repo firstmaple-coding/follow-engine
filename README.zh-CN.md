@@ -7,36 +7,36 @@
 > **项目现状与 Fork 说明 (firstmaple-coding Fork)：**
 > 本仓库是 [zarazhangrui/follow-builders](https://github.com/zarazhangrui/follow-builders) 的增强 Fork 版本。
 >
-> - **已验收且就绪的功能（零付费密钥）：** 我们实现并全流程验证了**本地手动、零付费 API 密钥的 AI 官方博客中文早报**。该流程直接抓取公开技术博客（Anthropic Engineering、Claude 官方博客），严格执行 72 小时时效校验、去重合并与原文抽取，将运行数据隔离至 `.runtime/` 目录（确保 Git 代码工作区 100% 保持干净），并通过 `.agents/skills/daily-blog-digest/SKILL.md` 原生支持 ChatGPT 桌面端及本地 Agent。
+> - **已验收的手动流程（无需付费信源 API 密钥）：** 已在 Work 模式本地项目中完成中文博客早报的全流程验收。流程执行 72 小时时效校验，将运行数据写入 `.runtime/`，并使用 `.agents/skills/daily-blog-digest/SKILL.md`。Claude Blog 的近期文章正文提取已实测；Anthropic Engineering 已配置且索引请求完成，但当次没有符合时效的新文章，其详情页提取尚未实测。
 > - **各模块依赖边界说明（客观披露）：**
->   - **X / Twitter 抓取：** 依赖官方 Twitter API Developer 权限与 `X_BEARER_TOKEN`（付费 / 高级权限），未配置时自动跳过。
->   - **播客（YouTube 字幕）抓取：** 依赖 `POD2TXT_API_KEY`（或第三方转写服务）。*注：YouTube 官方 API `captions.download` 要求对视频拥有所有权或编辑权限，无法直接作为通用公共字幕拉取方案。*
->   - **GitHub Actions 自动化流水线：** 每日自动化工作流（`.github/workflows/daily.yml`）目前处于未启用状态，避免产生意外费用或非受控运行；当前均以本地手动受控运行为主。
+>   - **X / Twitter 抓取：** X 生成器需要 `X_BEARER_TOKEN`；默认全量生成器缺少该值时会退出，`--blogs-only` 模式不会运行 X。
+>   - **播客抓取：** 转录依赖 `POD2TXT_API_KEY`；默认全量生成器缺少该值时会退出，`--blogs-only` 模式不会运行播客。YouTube 官方 API `captions.download` 要求对视频有编辑权限，不能直接作为通用第三方视频字幕抓取方案。
+>   - **GitHub Actions 自动化流水线：** Feed 工作流（`.github/workflows/generate-feed.yml`）目前在本 Fork 未启用；已验收的博客流程仅在本地手动运行。
 
 ---
 
 ## 你会得到什么
 
-按需或每日在聊天应用中接收的精选摘要：
+已验收流程在本地聊天中按需生成中文博客摘要。仓库还保留了 X、播客与交付组件，但它们有各自的依赖：
 
-- **官方技术博客（已验收，零密钥）：** Anthropic Engineering 与 Claude 官方博客的最新技术文章与产品发布，包含原文核心句子引用与直达链接，严禁虚构。
+- **官方技术博客：** Claude Blog 的正文提取和本地早报已实测；Anthropic Engineering 已配置，仍待有符合时效的文章时验证详情提取。
 - **X 上的 AI 建造者：** 26 位顶尖 AI 建造者的核心观点与讨论（需配置 `X_BEARER_TOKEN`）。
 - **精选播客：** 6 档顶尖 AI 播客节目的关键洞察（需配置 `POD2TXT_API_KEY`）。
-- **多语言支持：** 支持简体中文、英文或中英双语输出。
+- **语言：** 手动博客 Skill 已以简体中文验收；底层预处理脚本也接受英文和中英双语配置。
 
 ---
 
 ## 已验收能力：手动官方博客早报（零付费密钥）
 
-你可以在本地或通过 ChatGPT 桌面端直接运行官方博客早报，无需任何付费 API 密钥。
+你可以在 Work 模式本地项目中运行官方博客早报，无需付费信源 API 密钥；本地 Agent 本身可能有账号或用量要求。
 
 ### 1. 在 ChatGPT 桌面端使用
 1. 克隆本仓库到本地：
    ```bash
    git clone https://github.com/firstmaple-coding/follow-engine.git
    ```
-2. 打开 ChatGPT 桌面端（或本地 Agent）。
-3. 仓库内已内置桌面 Skill：`.agents/skills/daily-blog-digest/SKILL.md`。
+2. 在 Work 模式中将本仓库作为本地项目打开（或使用能读取本地文件的 Agent）。
+3. 调用仓库中的 Skill：`.agents/skills/daily-blog-digest/SKILL.md`。
 4. 在会话中输入 **“生成今日早报”** 或 **“获取今日博客早报”**。
 5. Agent 会优先探测 `.runtime/feed-blogs.json`（24 小时内直接复用缓存，防止频繁请求被目标站点限流），并在需要时重新抓取，生成带直达链接与原文引述的中文早报。
 
@@ -51,13 +51,13 @@ node scripts/generate-feed.js --blogs-only --feed-dir .runtime
 node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-feed-age-hours 24 --language zh
 ```
 
-运行前后 Git tracked 文件完全不会被修改，代码工作区始终保持干净。
+上述命令把生成的 feed 与状态文件写入被 Git 忽略的 `.runtime/`，不会修改仓库中受跟踪的 feed 文件。
 
 ---
 
 ## 信息源与依赖说明
 
-### 官方博客（已验收 2 个）
+### 官方博客（已配置 2 个）
 - [Anthropic Engineering](https://www.anthropic.com/engineering) — Anthropic 团队的技术深度文章
 - [Claude Blog](https://claude.com/blog)（以及 `/resources/articles`）— Claude 的产品公告、研究与技术指南
 

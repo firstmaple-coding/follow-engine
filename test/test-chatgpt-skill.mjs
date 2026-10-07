@@ -1,5 +1,5 @@
-import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { tmpdir } from 'os';
 import { createHash } from 'crypto';
@@ -589,62 +589,63 @@ async function runAllTests() {
     }
   });
 
-  // 11. Runtime isolation and working directory hygiene
-  await testCase('Runtime isolation: .gitignore ignores .runtime/ and skill pipeline keeps tracked files 100% clean', () => {
-    // 1. Verify .gitignore includes .runtime/
+  // 11. Runtime isolation works in a fresh checkout without an existing local feed
+  await testCase('Runtime isolation: generated files stay under ignored .runtime/ without changing tracked feeds', () => {
     const gitignorePath = join(REPO_ROOT, '.gitignore');
     assert(existsSync(gitignorePath), '.gitignore must exist');
     const gitignoreContent = readFileSync(gitignorePath, 'utf-8');
-    assert(gitignoreContent.includes('.runtime'), '.gitignore must ignore .runtime/');
+    assert(gitignoreContent.split(/\r?\n/).includes('.runtime/'), '.gitignore must ignore .runtime/');
 
-    // 2. Snapshot root tracked files
     const trackedFiles = ['feed-blogs.json', 'state-feed.json', 'feed-x.json', 'feed-podcasts.json'];
     const hashesBefore = {};
     for (const file of trackedFiles) {
       hashesBefore[file] = sha256(join(REPO_ROOT, file));
     }
+    const runtimeRoot = join(REPO_ROOT, '.runtime');
+    mkdirSync(runtimeRoot, { recursive: true });
+    const tempDir = mkdtempSync(join(runtimeRoot, 'test-isolation-'));
+    const feedDir = join(tempDir, 'fresh-feed-dir');
+    const relativeFeedDir = relative(REPO_ROOT, feedDir);
 
-    // 3. Run prepare-digest with --feed-dir .runtime
-    const prepScript = join(REPO_ROOT, 'scripts', 'prepare-digest.js');
-    const res = spawnSync(process.execPath, [
-      prepScript,
-      '--local',
-      '--blogs-only',
-      '--feed-dir',
-      join(REPO_ROOT, '.runtime'),
-      '--max-feed-age-hours',
-      '24',
-      '--language',
-      'zh'
-    ], {
-      cwd: REPO_ROOT,
-      encoding: 'utf-8'
-    });
+    try {
+      const nowIso = new Date().toISOString();
+      const articleHtml = `<html><head><script type="application/ld+json">{"@type":"BlogPosting","headline":"Isolation Test Article","datePublished":"${nowIso}"}</script></head><body><div class="w-richtext">Isolation test body.</div></body></html>`;
+      const claudeIndex = '<html><body><a href="/resources/articles/isolation-test">Isolation Test</a></body></html>';
+      const mockPath = join(tempDir, 'mock-fetch.mjs');
+      writeFileSync(mockPath, [
+        'globalThis.fetch = async (url) => {',
+        '  const value = String(url);',
+        '  if (value.includes("anthropic.com/engineering")) return new Response("<html><body>Empty</body></html>", { status: 200 });',
+        `  if (value.includes("claude.com/resources/articles/isolation-test")) return new Response(${JSON.stringify(articleHtml)}, { status: 200 });`,
+        `  if (value.includes("claude.com")) return new Response(${JSON.stringify(claudeIndex)}, { status: 200 });`,
+        '  return new Response("Not Found", { status: 404 });',
+        '};'
+      ].join('\n'), 'utf-8');
 
-    assert.strictEqual(res.status, 0, `Expected prepare-digest to succeed with --feed-dir .runtime: ${res.stderr}`);
-    const data = JSON.parse(res.stdout);
-    assert.strictEqual(data.status, 'ok');
+      const genRes = spawnSync(process.execPath, [
+        '--import', pathToFileURL(mockPath).href,
+        join(REPO_ROOT, 'scripts', 'generate-feed.js'),
+        '--blogs-only', '--feed-dir', relativeFeedDir
+      ], { cwd: REPO_ROOT, encoding: 'utf-8' });
+      assert.strictEqual(genRes.status, 0, `Expected isolated generation to succeed: ${genRes.stderr}`);
+      assert(existsSync(join(feedDir, 'feed-blogs.json')), 'Generator must create the isolated feed directory');
+      assert(existsSync(join(feedDir, 'state-feed.json')), 'Generator must write isolated dedupe state');
 
-    // 4. Verify none of the tracked root files were modified
-    for (const file of trackedFiles) {
-      const hashAfter = sha256(join(REPO_ROOT, file));
-      assert.strictEqual(
-        hashAfter,
-        hashesBefore[file],
-        `Tracked file ${file} must remain byte-identical after running skill with --feed-dir .runtime`
-      );
+      const prepRes = spawnSync(process.execPath, [
+        join(REPO_ROOT, 'scripts', 'prepare-digest.js'),
+        '--local', '--blogs-only', '--feed-dir', relativeFeedDir,
+        '--max-feed-age-hours', '24', '--language', 'zh'
+      ], { cwd: REPO_ROOT, encoding: 'utf-8' });
+      assert.strictEqual(prepRes.status, 0, `Expected isolated preparation to succeed: ${prepRes.stderr}`);
+      assert.strictEqual(JSON.parse(prepRes.stdout).stats.blogPosts, 1);
+
+      for (const file of trackedFiles) {
+        assert.strictEqual(sha256(join(REPO_ROOT, file)), hashesBefore[file], `${file} must remain byte-identical`);
+      }
+      assert(relative(runtimeRoot, feedDir).startsWith('test-isolation-'), 'Generated feed must stay under .runtime/');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
     }
-
-    // 5. Verify git status on tracked files is completely clean
-    const gitStatusRes = spawnSync('git', ['status', '--porcelain', ...trackedFiles], {
-      cwd: REPO_ROOT,
-      encoding: 'utf-8'
-    });
-    assert.strictEqual(
-      gitStatusRes.stdout.trim(),
-      '',
-      `Git tracked files must have no unstaged changes: ${gitStatusRes.stdout}`
-    );
   });
 
   console.log(`\n========================================`);

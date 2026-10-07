@@ -7,36 +7,36 @@ An AI-powered digest that tracks top builders in AI — researchers, founders, P
 > **Project Status (firstmaple-coding Fork):**
 > This repository is an active Fork of [zarazhangrui/follow-builders](https://github.com/zarazhangrui/follow-builders).
 >
-> - **Verified & Production-Ready (Zero Paid Keys):** We have implemented and end-to-end verified a **manual, 100% free / zero-paid-API-key AI Official Blog Digest** workflow. It extracts public posts from AI engineering blogs (Anthropic Engineering, Claude Blog), strictly enforces article freshness (72-hour window), isolates runtime data to `.runtime/` (keeping Git tracked files completely clean), and provides a desktop Skill (`.agents/skills/daily-blog-digest/SKILL.md`) for ChatGPT Desktop and local agents.
+> - **Verified manual workflow (no paid source API keys):** A local Chinese blog digest has been tested end to end in Work mode. It checks article freshness (72-hour window), keeps generated data in `.runtime/`, and uses `.agents/skills/daily-blog-digest/SKILL.md`. Claude Blog article extraction was verified with current posts. Anthropic Engineering is configured and its index was fetched, but no fresh article was available to verify its detail extraction in that run.
 > - **Dependency Boundaries (Honest Disclosure):**
->   - **X / Twitter:** Requires an official Twitter API Developer account and `X_BEARER_TOKEN` (paid / elevated tier). If not provided, Twitter generation is skipped.
->   - **Podcasts / YouTube Transcripts:** Requires `POD2TXT_API_KEY` (or a third-party transcription provider). Note: The official YouTube Data API v3 `captions.download` method requires video edit/ownership permissions and cannot serve as an open third-party subtitle downloader for arbitrary public videos.
->   - **GitHub Actions Automation:** The automated daily workflow (`.github/workflows/daily.yml`) is currently inactive / disabled in this Fork to prevent unexpected billing or uninspected executions. All verified workflows run manually and locally.
+>   - **X / Twitter:** The X generator requires `X_BEARER_TOKEN`. The full generator exits if it is missing; `--blogs-only` does not run X.
+>   - **Podcasts:** Transcript generation requires `POD2TXT_API_KEY`. The full generator exits if it is missing; `--blogs-only` does not run podcasts. YouTube Data API v3 `captions.download` requires permission to edit the video, so it is not a general way to download captions from third-party videos.
+>   - **GitHub Actions Automation:** The feed workflow (`.github/workflows/generate-feed.yml`) is currently inactive in this Fork. The verified blog workflow runs manually and locally.
 
 ---
 
 ## What You Get
 
-A daily or on-demand digest delivered in-chat or to your preferred messaging apps:
+The verified workflow produces an on-demand Chinese blog digest in the local chat. The repository also contains earlier X, podcast, and delivery components with separate dependencies:
 
-- **Official AI Blogs (Verified, Zero Keys):** Fresh technical deep dives and announcements from top AI labs (Anthropic Engineering, Claude Blog) with direct links, original quotes, and strict anti-fabrication rules.
+- **Official AI Blogs:** Claude Blog article extraction and the local digest were verified; Anthropic Engineering is configured, with detail extraction awaiting a fresh qualifying article.
 - **AI Builders on X:** Key posts and insights from 26 curated AI builders (requires `X_BEARER_TOKEN`).
 - **Podcasts:** Episode summaries from 6 top AI podcasts (requires `POD2TXT_API_KEY`).
-- **Languages:** Available in English, Chinese (Mandarin), or bilingual format.
+- **Languages:** The manual blog Skill was verified in Chinese; the underlying preparation script also accepts English and bilingual settings.
 
 ---
 
 ## Verified Feature: Manual Daily Blog Digest (Zero Paid Keys)
 
-You can run the official blog digest locally or via ChatGPT Desktop without any API keys or paid accounts.
+You can run the official blog digest in a local Work project without paid source API keys. Access to the local agent may have its own account or usage requirements.
 
 ### 1. Using ChatGPT Desktop
 1. Clone this repository to your local machine:
    ```bash
    git clone https://github.com/firstmaple-coding/follow-engine.git
    ```
-2. Open ChatGPT Desktop (or your local Agent).
-3. The desktop skill is located at `.agents/skills/daily-blog-digest/SKILL.md`.
+2. Open this repository as a local project in Work mode (or another local agent with filesystem access).
+3. Invoke the repository Skill at `.agents/skills/daily-blog-digest/SKILL.md`.
 4. Say **"生成今日早报"** or **"获取今日博客早报"**.
 5. The agent checks `.runtime/feed-blogs.json` for same-day freshness (reusing cached results within 24 hours to prevent rate limits), fetches fresh articles if needed, and outputs a verified Chinese digest with direct links and quotes.
 
@@ -51,13 +51,13 @@ node scripts/generate-feed.js --blogs-only --feed-dir .runtime
 node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-feed-age-hours 24 --language zh
 ```
 
-The Git working tree remains completely clean because all runtime files are placed in `.runtime/` (configured in `.gitignore`).
+These commands keep generated feed and state files in `.runtime/`, which is ignored by Git. They do not modify the repository's tracked feed files.
 
 ---
 
 ## Sources & Boundaries
 
-### Official Blogs (2 verified)
+### Official Blogs (2 configured)
 - [Anthropic Engineering](https://www.anthropic.com/engineering) — technical deep dives from the Anthropic team
 - [Claude Blog](https://claude.com/blog) (and `/resources/articles`) — product announcements, research, and technical guides
 
