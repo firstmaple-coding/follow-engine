@@ -780,6 +780,56 @@ function parseClaudeBlogIndex(html) {
   return articles;
 }
 
+// Full-text RSS carries an authoritative publication date, original link, and body.
+// Keep only links on the configured publisher's host so RSS content cannot redirect
+// the digest to an unrelated site.
+function parseFullTextBlogRss(xml, blog, errors = []) {
+  const articles = [];
+  const seenUrls = new Set();
+  const expectedHost = new URL(blog.articleBaseUrl).hostname;
+  const readField = (block, tag) => {
+    const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const value = block.match(new RegExp(`<${escaped}>([\\s\\S]*?)<\\/${escaped}>`, "i"))?.[1] || "";
+    return value.replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "").trim();
+  };
+
+  for (const match of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const block = match[1];
+    const title = decodeHtmlEntities(readField(block, "title"));
+    const rawLink = decodeHtmlEntities(readField(block, "link"));
+    const publishedAt = readField(block, "pubDate");
+    const bodyHtml = readField(block, "content:encoded");
+    let url;
+    try {
+      url = new URL(rawLink);
+    } catch {
+      errors.push(`Blog: Invalid RSS article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+    if (url.protocol !== "https:" || url.hostname !== expectedHost) {
+      errors.push(`Blog: Unexpected RSS article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+    if (seenUrls.has(url.href)) continue;
+    seenUrls.add(url.href);
+    if (!publishedAt || Number.isNaN(new Date(publishedAt).getTime())) {
+      errors.push(`Blog: Missing or invalid RSS publication date for ${url.href}`);
+      continue;
+    }
+    const content = decodeHtmlEntities(bodyHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " "));
+    if (content.length < 200) {
+      errors.push(`Blog: Missing full RSS article content for ${url.href}`);
+      continue;
+    }
+    articles.push({ title, url: url.href, publishedAt, description: "", content });
+  }
+  return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+}
+
 function decodeHtmlEntities(str) {
   if (!str || typeof str !== 'string') return str || '';
   return str
@@ -791,6 +841,18 @@ function decodeHtmlEntities(str) {
     .replace(/&#x27;/g, "'")
     .replace(/&apos;/g, "'")
     .replace(/&nbsp;/g, ' ')
+    .replace(/&rsquo;/g, '\u2019')
+    .replace(/&lsquo;/g, '\u2018')
+    .replace(/&rdquo;/g, '\u201d')
+    .replace(/&ldquo;/g, '\u201c')
+    .replace(/&#(\d+);/g, (match, code) => {
+      const value = Number(code);
+      return value <= 0x10ffff ? String.fromCodePoint(value) : match;
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (match, code) => {
+      const value = parseInt(code, 16);
+      return value <= 0x10ffff ? String.fromCodePoint(value) : match;
+    })
     .trim();
 }
 
@@ -1016,7 +1078,7 @@ async function fetchBlogContent(blogs, state, errors) {
     try {
       // Step 1: Discover articles from the blog index page
       const indexRes = await fetch(blog.indexUrl, {
-        headers: { "User-Agent": "FollowBuilders/1.0 (feed aggregator)" },
+        headers: { "User-Agent": blog.type === "rss-fulltext" ? RSS_USER_AGENT : "FollowBuilders/1.0 (feed aggregator)" },
       });
       if (!indexRes.ok) {
         errors.push(
@@ -1027,7 +1089,9 @@ async function fetchBlogContent(blogs, state, errors) {
       const indexHtml = await indexRes.text();
 
       // Use the right parser based on which blog this is
-      if (blog.indexUrl.includes("anthropic.com")) {
+      if (blog.type === "rss-fulltext") {
+        candidates = parseFullTextBlogRss(indexHtml, blog, errors);
+      } else if (blog.indexUrl.includes("anthropic.com")) {
         candidates = parseAnthropicEngineeringIndex(indexHtml);
       } else if (blog.indexUrl.includes("claude.com")) {
         candidates = parseClaudeBlogIndex(indexHtml);
@@ -1071,33 +1135,35 @@ async function fetchBlogContent(blogs, state, errors) {
           }
         }
 
-        // Fetch full article page
-        attemptedArticleFetches++;
         try {
-          const articleRes = await fetch(candidate.url, {
-            headers: { "User-Agent": "FollowBuilders/1.0 (feed aggregator)" },
-          });
-          if (!articleRes.ok) {
-            failedArticleFetches++;
-            errors.push(
-              `Blog: Failed to fetch article ${candidate.url}: HTTP ${articleRes.status}`,
-            );
-            continue;
-          }
-          const articleHtml = await articleRes.text();
-
-          // Use the right content extractor based on the blog or article URL
           let extracted;
-          if (
-            candidate.url.includes("anthropic.com/engineering") ||
-            blog.name.toLowerCase().includes("anthropic")
-          ) {
-            extracted = extractAnthropicArticleContent(articleHtml);
-          } else if (
-            candidate.url.includes("claude.com") ||
-            blog.name.toLowerCase().includes("claude")
-          ) {
-            extracted = extractClaudeBlogArticleContent(articleHtml);
+          if (blog.type === "rss-fulltext") {
+            extracted = candidate; // The publisher's RSS already contains full text.
+          } else {
+            attemptedArticleFetches++;
+            const articleRes = await fetch(candidate.url, {
+              headers: { "User-Agent": "FollowBuilders/1.0 (feed aggregator)" },
+            });
+            if (!articleRes.ok) {
+              failedArticleFetches++;
+              errors.push(
+                `Blog: Failed to fetch article ${candidate.url}: HTTP ${articleRes.status}`,
+              );
+              continue;
+            }
+            const articleHtml = await articleRes.text();
+
+            if (
+              candidate.url.includes("anthropic.com/engineering") ||
+              blog.name.toLowerCase().includes("anthropic")
+            ) {
+              extracted = extractAnthropicArticleContent(articleHtml);
+            } else if (
+              candidate.url.includes("claude.com") ||
+              blog.name.toLowerCase().includes("claude")
+            ) {
+              extracted = extractClaudeBlogArticleContent(articleHtml);
+            }
           }
 
           if (!extracted || !extracted.content) {
@@ -1443,4 +1509,5 @@ export {
   extractClaudeBlogArticleContent,
   parseAnthropicEngineeringIndex,
   parseClaudeBlogIndex,
+  parseFullTextBlogRss,
 };

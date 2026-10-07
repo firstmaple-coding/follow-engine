@@ -120,6 +120,14 @@ if (process.env.__GENERATE_FEED_MOCK_PRELOAD__ === '1') {
       return new Response(mockArticleHtml, { status: 200, headers: { 'Content-Type': 'text/html' } });
     }
 
+    // GitHub Engineering full-text RSS mock
+    if (urlStr === 'https://github.blog/engineering/feed/') {
+      const freshDate = new Date().toUTCString();
+      const body = 'GitHub engineering article content about agent-scale development. '.repeat(6);
+      const rss = `<rss><channel><item><title><![CDATA[Building Git infrastructure for agents]]></title><link>https://github.blog/engineering/agent-scale-test/</link><pubDate>${freshDate}</pubDate><content:encoded><![CDATA[<p>${body}</p>]]></content:encoded></item></channel></rss>`;
+      return new Response(rss, { status: 200, headers: { 'Content-Type': 'application/rss+xml' } });
+    }
+
     // X API User Lookup Mock
     if (urlStr.includes('api.x.com/2/users/by')) {
       const urlObj = new URL(urlStr);
@@ -270,7 +278,8 @@ async function main() {
     extractAnthropicArticleContent,
     extractClaudeBlogArticleContent,
     parseAnthropicEngineeringIndex,
-    parseClaudeBlogIndex
+    parseClaudeBlogIndex,
+    parseFullTextBlogRss
   } = await import(pathToFileURL(GENERATE_SCRIPT).href);
 
   // --------------------------------------------------------------------------
@@ -1142,7 +1151,44 @@ async function main() {
   });
 
   // --------------------------------------------------------------------------
-  // Test 20: Verify real workspace files remain 100% untouched
+  // Full-text RSS: validate source host, publication date, body, and no detail fetch
+  // --------------------------------------------------------------------------
+  await runAsyncTest('GitHub Engineering RSS accepts fresh full text and rejects off-site links', async () => {
+    const freshDate = new Date().toUTCString();
+    const oldDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toUTCString();
+    const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toUTCString();
+    const body = 'Agent-scale Git infrastructure requires reliable repository operations. '.repeat(6);
+    const item = (title, link, date) => `<item><title><![CDATA[${title}]]></title><link>${link}</link><pubDate>${date}</pubDate><content:encoded><![CDATA[<p>${body}</p>]]></content:encoded></item>`;
+    const rss = `<rss><channel>${item('Fresh &amp; relevant', 'https://github.blog/engineering/fresh/', freshDate)}${item('Untrusted', 'https://example.com/foreign/', freshDate)}${item('Old', 'https://github.blog/engineering/old/', oldDate)}${item('Future', 'https://github.blog/engineering/future/', futureDate)}</channel></rss>`;
+    const blog = { name: 'GitHub Engineering', type: 'rss-fulltext', indexUrl: 'https://github.blog/engineering/feed/', articleBaseUrl: 'https://github.blog/' };
+    const errors = [];
+    const parsed = parseFullTextBlogRss(rss, blog, errors);
+    assert.strictEqual(parsed.length, 3, 'Only same-host articles should be candidates');
+    assert(errors.some(e => e.includes('Unexpected RSS article URL')), 'Off-site article must be reported');
+    assert(parsed[0].content.length > 200, 'RSS body must contain usable full text');
+
+    const originalFetch = globalThis.fetch;
+    const requests = [];
+    try {
+      globalThis.fetch = async (url) => {
+        requests.push(String(url));
+        if (String(url) === blog.indexUrl) return new Response(rss, { status: 200 });
+        return new Response('Unexpected detail request', { status: 500 });
+      };
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const results = await fetchBlogContent([blog], state, []);
+      assert.strictEqual(results.length, 1, 'Only the fresh same-host article should enter the feed');
+      assert.strictEqual(results[0].title, 'Fresh & relevant');
+      assert.strictEqual(requests.length, 1, 'Full-text RSS must not require article detail fetches');
+      assert(state.seenArticles['https://github.blog/engineering/fresh/'], 'Accepted article must be deduplicated');
+      assert.strictEqual(state.seenArticles['https://github.blog/engineering/future/'], undefined, 'Future article must remain retryable');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // Verify real workspace files remain 100% untouched
   // --------------------------------------------------------------------------
   runTest('Workspace root files remain 100% bitwise untouched', () => {
     for (const f of filesToTrack) {
