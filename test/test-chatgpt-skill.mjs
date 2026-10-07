@@ -83,6 +83,8 @@ async function runAllTests() {
     assert(content.includes('严防误报最新'), 'Must forbid falsely claiming stale cache is freshly verified');
     assert(content.includes('不完整'), 'Must document that scraping errors lead to disclosure of incomplete results');
     assert(content.includes('透明披露') || content.includes('抓取异常主动披露'), 'Must instruct transparent disclosure of partial crawl issues');
+    assert(content.includes('--feed-dir .runtime'), 'Must document using --feed-dir .runtime');
+    assert(content.includes('.runtime'), 'Must document .runtime directory usage');
   });
 
   // 4. Preservation of root SKILL.md
@@ -585,6 +587,64 @@ async function runAllTests() {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  // 11. Runtime isolation and working directory hygiene
+  await testCase('Runtime isolation: .gitignore ignores .runtime/ and skill pipeline keeps tracked files 100% clean', () => {
+    // 1. Verify .gitignore includes .runtime/
+    const gitignorePath = join(REPO_ROOT, '.gitignore');
+    assert(existsSync(gitignorePath), '.gitignore must exist');
+    const gitignoreContent = readFileSync(gitignorePath, 'utf-8');
+    assert(gitignoreContent.includes('.runtime'), '.gitignore must ignore .runtime/');
+
+    // 2. Snapshot root tracked files
+    const trackedFiles = ['feed-blogs.json', 'state-feed.json', 'feed-x.json', 'feed-podcasts.json'];
+    const hashesBefore = {};
+    for (const file of trackedFiles) {
+      hashesBefore[file] = sha256(join(REPO_ROOT, file));
+    }
+
+    // 3. Run prepare-digest with --feed-dir .runtime
+    const prepScript = join(REPO_ROOT, 'scripts', 'prepare-digest.js');
+    const res = spawnSync(process.execPath, [
+      prepScript,
+      '--local',
+      '--blogs-only',
+      '--feed-dir',
+      join(REPO_ROOT, '.runtime'),
+      '--max-feed-age-hours',
+      '24',
+      '--language',
+      'zh'
+    ], {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8'
+    });
+
+    assert.strictEqual(res.status, 0, `Expected prepare-digest to succeed with --feed-dir .runtime: ${res.stderr}`);
+    const data = JSON.parse(res.stdout);
+    assert.strictEqual(data.status, 'ok');
+
+    // 4. Verify none of the tracked root files were modified
+    for (const file of trackedFiles) {
+      const hashAfter = sha256(join(REPO_ROOT, file));
+      assert.strictEqual(
+        hashAfter,
+        hashesBefore[file],
+        `Tracked file ${file} must remain byte-identical after running skill with --feed-dir .runtime`
+      );
+    }
+
+    // 5. Verify git status on tracked files is completely clean
+    const gitStatusRes = spawnSync('git', ['status', '--porcelain', ...trackedFiles], {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8'
+    });
+    assert.strictEqual(
+      gitStatusRes.stdout.trim(),
+      '',
+      `Git tracked files must have no unstaged changes: ${gitStatusRes.stdout}`
+    );
   });
 
   console.log(`\n========================================`);
