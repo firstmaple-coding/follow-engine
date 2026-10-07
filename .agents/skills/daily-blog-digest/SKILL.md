@@ -14,36 +14,40 @@ description: "手动抓取最新公开官方 AI 博客（Anthropic、Claude 等�
 
 ## 执行流程与决策机制
 
-为了确保同一天多次请求早报时响应迅速、结果一致，且既有博客 feed 不被意外清空，执行时遵循“优先探测复用当天有效结果，按需执行网络抓取”的轻量策略：
+为了确保同一天多次请求早报时响应迅速、结果一致，且避免污染受 Git 跟踪的代码工作区，执行时遵循“运行数据隔离、优先探测复用当天有效结果、按需执行网络抓取”的策略：
 
 所有命令均需在 **仓库根目录 (`follow-engine`)** 下执行。
+**运行数据目录隔离**：所有本地生成与预处理命令均统一使用 `--feed-dir .runtime` 参数。生成的文件（`feed-blogs.json`、`state-feed.json`）将写入受 `.gitignore` 保护的 `.runtime/` 目录中，确保抓取与生成前后仓库代码工作区（Git working tree）100% 保持干净。
 
 ### 决策机制：何时复用当天结果 vs. 何时重新抓取
 
 1. **何时复用当天结果（优先探测）**：
-   - 当本地已有 `feed-blogs.json`，且生成时间在 24 小时以内（`maxFeedAgeHours 24` 有效），并且包含有效文章（`stats.blogPosts > 0`）时，**直接复用该文件**生成早报；
+   - 当 `.runtime/` 中已有 `feed-blogs.json`，且生成时间在 24 小时以内（`maxFeedAgeHours 24` 有效），并且包含有效文章（`stats.blogPosts > 0`）时，**直接复用该文件**生成早报；
    - 这样既避免在同一天频繁发起外部网络请求引发目标站点限流，也能保证同一天多次调用时内容不丢失、不闪退、秒级响应。
 
    探测命令：
    ```bash
-   node scripts/prepare-digest.js --local --blogs-only --max-feed-age-hours 24 --language zh
+   node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-feed-age-hours 24 --language zh
    ```
    - 若执行成功（退出码 0，`status: "ok"` 且 `stats.blogPosts > 0`），且用户**未**要求强制刷新，直接进入【步骤 3：生成中文早报】。
 
 2. **何时重新抓取（执行抓取）**：
    - 出现以下任一情况时，才执行网络抓取：
-     1. 本地不存在 `feed-blogs.json`（首次运行）；
+     1. `.runtime/` 中不存在 `feed-blogs.json`（首次运行）；
      2. 本地 feed 超过 24 小时（已过期失效，预处理返回错误退出码 1）；
      3. 用户明确提出“重新抓取”、“刷新早报”、“获取最新更新”；
      4. 上次探测结果为 0 篇（可能此前未发布，用户再次主动触发抓取）。
 
    抓取命令：
    ```bash
-   node scripts/generate-feed.js --blogs-only
+   node scripts/generate-feed.js --blogs-only --feed-dir .runtime
    ```
    - **抓取失败处理（严防误报最新）**：若抓取命令失败（退出码非 0，例如网络异常、来源解析失败或候选详情全部抓取失败），**必须立即终止流程并明确向用户报告刷新失败**（例如：“今日官方博客源抓取失败，无法获取最新动态，请检查网络后重试”）。**绝对不得**隐瞒失败、不得声称已获取最新内容，亦**不得**静默使用本地旧缓存伪装成刚验证的最新结果。
    - **安全合并机制**：当网络抓取成功完成时，即使部分文章已被去重，生成端也会自动保留 72 小时内的仍有效合格文章，绝不将数据意外清空。
-   抓取成功后，再次运行探测命令读取最新结构化数据并进入【步骤 2：时效与内容检查】。
+   抓取成功后，再次运行探测命令读取最新结构化数据并进入【步骤 2：时效与内容检查】：
+   ```bash
+   node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-feed-age-hours 24 --language zh
+   ```
 
 ### 步骤 2：时效与内容检查
 

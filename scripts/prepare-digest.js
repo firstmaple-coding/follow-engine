@@ -20,7 +20,7 @@
 
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 
@@ -120,7 +120,7 @@ async function main() {
   const isBlogsOnly = args.includes('--blogs-only') || process.env.BLOGS_ONLY === '1';
 
   const feedDirArgIndex = args.indexOf('--feed-dir');
-  const feedDir = feedDirArgIndex !== -1 ? args[feedDirArgIndex + 1] : (process.env.FEED_DIR || REPO_ROOT);
+  const feedDir = resolve(feedDirArgIndex !== -1 ? args[feedDirArgIndex + 1] : (process.env.FEED_DIR || REPO_ROOT));
 
   const maxAgeArgIndex = args.indexOf('--max-feed-age-hours');
   let maxFeedAgeHours = null;

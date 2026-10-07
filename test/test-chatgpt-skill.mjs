@@ -1,5 +1,5 @@
-import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { tmpdir } from 'os';
 import { createHash } from 'crypto';
@@ -83,6 +83,8 @@ async function runAllTests() {
     assert(content.includes('严防误报最新'), 'Must forbid falsely claiming stale cache is freshly verified');
     assert(content.includes('不完整'), 'Must document that scraping errors lead to disclosure of incomplete results');
     assert(content.includes('透明披露') || content.includes('抓取异常主动披露'), 'Must instruct transparent disclosure of partial crawl issues');
+    assert(content.includes('--feed-dir .runtime'), 'Must document using --feed-dir .runtime');
+    assert(content.includes('.runtime'), 'Must document .runtime directory usage');
   });
 
   // 4. Preservation of root SKILL.md
@@ -582,6 +584,65 @@ async function runAllTests() {
         prepData.errors && prepData.errors.some(e => e.includes('Anthropic Engineering')),
         'prepare-digest must expose the blog source error so Skill can notify user of incomplete result'
       );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // 11. Runtime isolation works in a fresh checkout without an existing local feed
+  await testCase('Runtime isolation: generated files stay under ignored .runtime/ without changing tracked feeds', () => {
+    const gitignorePath = join(REPO_ROOT, '.gitignore');
+    assert(existsSync(gitignorePath), '.gitignore must exist');
+    const gitignoreContent = readFileSync(gitignorePath, 'utf-8');
+    assert(gitignoreContent.split(/\r?\n/).includes('.runtime/'), '.gitignore must ignore .runtime/');
+
+    const trackedFiles = ['feed-blogs.json', 'state-feed.json', 'feed-x.json', 'feed-podcasts.json'];
+    const hashesBefore = {};
+    for (const file of trackedFiles) {
+      hashesBefore[file] = sha256(join(REPO_ROOT, file));
+    }
+    const runtimeRoot = join(REPO_ROOT, '.runtime');
+    mkdirSync(runtimeRoot, { recursive: true });
+    const tempDir = mkdtempSync(join(runtimeRoot, 'test-isolation-'));
+    const feedDir = join(tempDir, 'fresh-feed-dir');
+    const relativeFeedDir = relative(REPO_ROOT, feedDir);
+
+    try {
+      const nowIso = new Date().toISOString();
+      const articleHtml = `<html><head><script type="application/ld+json">{"@type":"BlogPosting","headline":"Isolation Test Article","datePublished":"${nowIso}"}</script></head><body><div class="w-richtext">Isolation test body.</div></body></html>`;
+      const claudeIndex = '<html><body><a href="/resources/articles/isolation-test">Isolation Test</a></body></html>';
+      const mockPath = join(tempDir, 'mock-fetch.mjs');
+      writeFileSync(mockPath, [
+        'globalThis.fetch = async (url) => {',
+        '  const value = String(url);',
+        '  if (value.includes("anthropic.com/engineering")) return new Response("<html><body>Empty</body></html>", { status: 200 });',
+        `  if (value.includes("claude.com/resources/articles/isolation-test")) return new Response(${JSON.stringify(articleHtml)}, { status: 200 });`,
+        `  if (value.includes("claude.com")) return new Response(${JSON.stringify(claudeIndex)}, { status: 200 });`,
+        '  return new Response("Not Found", { status: 404 });',
+        '};'
+      ].join('\n'), 'utf-8');
+
+      const genRes = spawnSync(process.execPath, [
+        '--import', pathToFileURL(mockPath).href,
+        join(REPO_ROOT, 'scripts', 'generate-feed.js'),
+        '--blogs-only', '--feed-dir', relativeFeedDir
+      ], { cwd: REPO_ROOT, encoding: 'utf-8' });
+      assert.strictEqual(genRes.status, 0, `Expected isolated generation to succeed: ${genRes.stderr}`);
+      assert(existsSync(join(feedDir, 'feed-blogs.json')), 'Generator must create the isolated feed directory');
+      assert(existsSync(join(feedDir, 'state-feed.json')), 'Generator must write isolated dedupe state');
+
+      const prepRes = spawnSync(process.execPath, [
+        join(REPO_ROOT, 'scripts', 'prepare-digest.js'),
+        '--local', '--blogs-only', '--feed-dir', relativeFeedDir,
+        '--max-feed-age-hours', '24', '--language', 'zh'
+      ], { cwd: REPO_ROOT, encoding: 'utf-8' });
+      assert.strictEqual(prepRes.status, 0, `Expected isolated preparation to succeed: ${prepRes.stderr}`);
+      assert.strictEqual(JSON.parse(prepRes.stdout).stats.blogPosts, 1);
+
+      for (const file of trackedFiles) {
+        assert.strictEqual(sha256(join(REPO_ROOT, file)), hashesBefore[file], `${file} must remain byte-identical`);
+      }
+      assert(relative(runtimeRoot, feedDir).startsWith('test-isolation-'), 'Generated feed must stay under .runtime/');
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

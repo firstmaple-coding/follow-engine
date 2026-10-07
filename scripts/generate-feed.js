@@ -14,7 +14,7 @@
 // Env vars needed: X_BEARER_TOKEN, POD2TXT_API_KEY
 // ============================================================================
 
-import { readFile, writeFile } from "fs/promises";
+import { readFile, writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { join, resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -1212,6 +1212,11 @@ async function main() {
     feedDir = args[feedDirIndex + 1];
   } else if (process.env.FEED_DIR) {
     feedDir = process.env.FEED_DIR;
+  }
+  feedDir = resolve(feedDir);
+
+  if (!dryRun) {
+    await mkdir(feedDir, { recursive: true });
   }
 
   if (dryRun) {
