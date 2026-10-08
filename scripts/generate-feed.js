@@ -830,6 +830,230 @@ function parseFullTextBlogRss(xml, blog, errors = []) {
   return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 }
 
+// Atom 1.0 feed parser with full-text summary or content.
+// Extracts title, url, publishedAt, content, and contentSource without requesting article details.
+function parseFullTextAtomFeed(xml, blog, errors = []) {
+  const articles = [];
+  const seenUrls = new Set();
+  const expectedHost = new URL(blog.articleBaseUrl).hostname;
+
+  for (const match of xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/gi)) {
+    const block = match[1];
+
+    // 1. Link selection:
+    // Only accept link with rel="alternate" or omitted rel (Atom default).
+    // Do not pass unknown relations or rel="self"/"enclosure".
+    const linkTags = [...block.matchAll(/<link\b([^>]*)\/?>/gi)];
+    let rawLink = null;
+    for (const tagMatch of linkTags) {
+      const attrs = tagMatch[1];
+      const hrefMatch = attrs.match(/\bhref=["']([^"']*)["']/i);
+      if (!hrefMatch) continue;
+      const relMatch = attrs.match(/\brel=["']([^"']*)["']/i);
+      const rel = relMatch ? relMatch[1].trim().toLowerCase() : "";
+      if (rel === "alternate" || rel === "") {
+        rawLink = hrefMatch[1].trim();
+        break;
+      }
+    }
+
+    if (!rawLink) {
+      errors.push(`Blog: No alternate article link found in Atom entry for ${blog.name}`);
+      continue;
+    }
+
+    let url;
+    try {
+      url = new URL(rawLink);
+    } catch {
+      errors.push(`Blog: Invalid Atom article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+
+    if (url.protocol !== "https:" || url.hostname !== expectedHost) {
+      errors.push(`Blog: Unexpected Atom article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+
+    if (seenUrls.has(url.href)) continue;
+    seenUrls.add(url.href);
+
+    // 2. Title extraction:
+    const rawTitle = block.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "";
+    const title = decodeHtmlEntities(rawTitle.replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "").trim());
+
+    // 3. Strict published date handling:
+    // Reject or skip if <published> is missing or invalid. Never substitute with <updated>.
+    const publishedRaw = block.match(/<published\b[^>]*>([\s\S]*?)<\/published>/i)?.[1]
+      ?.replace(/^<!\[CDATA\[/, "")
+      ?.replace(/\]\]>$/, "")
+      ?.trim();
+    if (!publishedRaw) {
+      errors.push(`Blog: Missing Atom publication date for ${url.href}`);
+      continue;
+    }
+
+    const pubDate = new Date(publishedRaw);
+    if (Number.isNaN(pubDate.getTime())) {
+      errors.push(`Blog: Invalid Atom publication date for ${url.href}: ${publishedRaw}`);
+      continue;
+    }
+    const publishedAt = pubDate.toISOString();
+
+    // 4. Content / Summary extraction:
+    // Distinguish whether content came from <content> (atom-content) or <summary> (atom-summary)
+    let contentSource = "atom-summary";
+    let rawContent = "";
+    const contentMatch = block.match(/<content\b[^>]*>([\s\S]*?)<\/content>/i);
+    const summaryMatch = block.match(/<summary\b[^>]*>([\s\S]*?)<\/summary>/i);
+    if (contentMatch && contentMatch[1].trim()) {
+      contentSource = "atom-content";
+      rawContent = contentMatch[1];
+    } else if (summaryMatch && summaryMatch[1].trim()) {
+      contentSource = "atom-summary";
+      rawContent = summaryMatch[1];
+    } else {
+      errors.push(`Blog: Missing Atom content/summary for ${url.href}`);
+      continue;
+    }
+
+    // First clean outer whitespace from rawContent, then identify and strip CDATA.
+    // Inside CDATA, content is already unescaped HTML; skip outer XML layer decoding
+    // while strictly preserving internal prose and code whitespace.
+    let bodyHtml = rawContent.trim();
+    if (bodyHtml.startsWith("<![CDATA[") && bodyHtml.endsWith("]]>")) {
+      bodyHtml = bodyHtml.slice(9, -3);
+    } else {
+      bodyHtml = decodeXmlLayer(bodyHtml);
+    }
+
+    // 1. Extract and protect code blocks (<pre><code> or <pre>) BEFORE stripping HTML tags.
+    // This preserves newlines, indentation, and angle brackets/comparison operators inside code.
+    const codeBlocks = [];
+    bodyHtml = bodyHtml.replace(/<pre\b[^>]*>(?:<code\b[^>]*>)?([\s\S]*?)(?:<\/code>)?<\/pre>/gi, (m, inner) => {
+      const token = `__CODE_BLOCK_${codeBlocks.length}__`;
+      let cleanCode = inner.replace(/<br\s*\/?>/gi, "\n");
+      cleanCode = cleanCode.replace(/<[^>]+>/g, "");
+      cleanCode = decodeHtmlEntities(cleanCode);
+      codeBlocks.push(`\n\`\`\`\n${cleanCode.trimEnd()}\n\`\`\`\n`);
+      return `\n\n${token}\n\n`;
+    });
+
+    // 2. Extract and protect inline <code> blocks
+    const inlineCodes = [];
+    bodyHtml = bodyHtml.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (m, inner) => {
+      const token = `__INLINE_CODE_${inlineCodes.length}__`;
+      let cleanCode = inner.replace(/<br\s*\/?>/gi, " ");
+      cleanCode = cleanCode.replace(/<[^>]+>/g, "");
+      cleanCode = decodeHtmlEntities(cleanCode);
+      inlineCodes.push(`\`${cleanCode.trim()}\``);
+      return token;
+    });
+
+    // 3. Clean dangerous or non-content tags
+    bodyHtml = bodyHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<svg[\s\S]*?<\/svg>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "");
+
+    // 4. Strip trailing tags navigation (e.g. <p>Tags: <a ...>...</a></p>)
+    bodyHtml = bodyHtml.replace(/<p\b[^>]*>\s*Tags:\s*<a\b[\s\S]*?<\/p>/gi, "");
+
+    // 5. Format blockquotes with markdown citation style (> ...) to preserve quote attribution
+    bodyHtml = bodyHtml.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (m, inner) => {
+      const cleanInner = inner.replace(/<\/?p\b[^>]*>/gi, "").trim();
+      return "\n\n> " + cleanInner + "\n\n";
+    });
+
+    // 6. Format list items
+    bodyHtml = bodyHtml.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (m, inner) => {
+      const cleanInner = inner.replace(/<\/?p\b[^>]*>/gi, "").trim();
+      return "\n- " + cleanInner;
+    });
+
+    // 7. Preserve evidence links and resolve relative links to full absolute URLs based on article URL
+    bodyHtml = bodyHtml.replace(/<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (m, href, anchorText) => {
+      const cleanAnchor = anchorText.replace(/<[^>]+>/g, "").trim();
+      const rawHref = href.trim();
+      if (!rawHref || rawHref.startsWith("#") || rawHref.toLowerCase().startsWith("javascript:")) {
+        return cleanAnchor;
+      }
+      let resolvedHref = rawHref;
+      try {
+        const parsed = new URL(rawHref, url.href);
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          resolvedHref = parsed.href;
+        } else {
+          return cleanAnchor;
+        }
+      } catch {
+        return cleanAnchor;
+      }
+      if (!cleanAnchor || cleanAnchor === resolvedHref) return resolvedHref;
+      return `${cleanAnchor} (${resolvedHref})`;
+    });
+
+    // 8. Format paragraphs and line breaks
+    bodyHtml = bodyHtml.replace(/<p\b[^>]*>/gi, "");
+    bodyHtml = bodyHtml.replace(/<\/p>/gi, "\n\n");
+    bodyHtml = bodyHtml.replace(/<br\s*\/?>/gi, "\n");
+    bodyHtml = bodyHtml.replace(/<\/h[1-6]>/gi, "\n\n");
+
+    // 9. Strip remaining HTML tags from prose
+    bodyHtml = bodyHtml.replace(/<[^>]+>/g, " ");
+
+    // 10. Decode entities in prose
+    bodyHtml = decodeHtmlEntities(bodyHtml);
+
+    // 11. Restore inline code and code block tokens
+    bodyHtml = bodyHtml.replace(/__INLINE_CODE_(\d+)__/g, (m, id) => inlineCodes[Number(id)]);
+    bodyHtml = bodyHtml.replace(/__CODE_BLOCK_(\d+)__/g, (m, id) => codeBlocks[Number(id)]);
+
+    // 12. Split and clean lines while strictly preserving code block indentation and newlines
+    let inCodeBlock = false;
+    const rawLines = bodyHtml.split("\n");
+    const processedLines = [];
+    for (const rawLine of rawLines) {
+      if (rawLine.trim().startsWith("```")) {
+        inCodeBlock = !inCodeBlock;
+        processedLines.push(rawLine.trim());
+        continue;
+      }
+      if (inCodeBlock) {
+        // Inside code block: preserve leading indentation (spaces/tabs), only trimEnd
+        processedLines.push(rawLine.trimEnd());
+      } else {
+        const trimmed = rawLine.trim();
+        if (trimmed.length > 0 || (processedLines.length > 0 && processedLines[processedLines.length - 1].length > 0)) {
+          processedLines.push(trimmed);
+        }
+      }
+    }
+
+    const content = processedLines.join("\n").trim();
+
+    if (!content || content.length < 20) {
+      errors.push(`Blog: Missing substantial Atom article content for ${url.href}`);
+      continue;
+    }
+
+    const author = block.match(/<author\b[^>]*>[\s\S]*?<name\b[^>]*>([\s\S]*?)<\/name>/i)?.[1]?.trim() || "Simon Willison";
+
+    articles.push({
+      title: title || "Untitled",
+      url: url.href,
+      publishedAt,
+      author,
+      description: "",
+      content,
+      contentSource,
+    });
+  }
+
+  return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+}
+
 // RSS index with dates and original links; the article page supplies the body.
 function parseBlogRssIndex(xml, blog, errors = []) {
   const articles = [];
@@ -869,10 +1093,23 @@ function parseBlogRssIndex(xml, blog, errors = []) {
   return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 }
 
+function decodeXmlLayer(str) {
+  if (!str || typeof str !== 'string') return str || '';
+  // Decode XML envelope entities without prematurely decoding &amp;
+  // &amp; MUST be replaced LAST so &amp;lt; becomes &lt; instead of < !
+  return str
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 function decodeHtmlEntities(str) {
   if (!str || typeof str !== 'string') return str || '';
   return str
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
@@ -892,6 +1129,7 @@ function decodeHtmlEntities(str) {
       const value = parseInt(code, 16);
       return value <= 0x10ffff ? String.fromCodePoint(value) : match;
     })
+    .replace(/&amp;/g, '&')
     .trim();
 }
 
@@ -1179,6 +1417,8 @@ async function fetchBlogContent(blogs, state, errors) {
       // Use the right parser based on which blog this is
       if (blog.type === "rss-fulltext") {
         candidates = parseFullTextBlogRss(indexHtml, blog, errors);
+      } else if (blog.type === "atom-fulltext") {
+        candidates = parseFullTextAtomFeed(indexHtml, blog, errors);
       } else if (blog.type === "rss-detail") {
         candidates = parseBlogRssIndex(indexHtml, blog, errors);
       } else if (blog.indexUrl.includes("anthropic.com")) {
@@ -1227,8 +1467,8 @@ async function fetchBlogContent(blogs, state, errors) {
 
         try {
           let extracted;
-          if (blog.type === "rss-fulltext") {
-            extracted = candidate; // The publisher's RSS already contains full text.
+          if (blog.type === "rss-fulltext" || blog.type === "atom-fulltext") {
+            extracted = candidate; // The publisher's RSS or Atom feed already contains full text or summary.
           } else {
             attemptedArticleFetches++;
             const articleRes = await fetch(candidate.url, {
@@ -1315,6 +1555,7 @@ async function fetchBlogContent(blogs, state, errors) {
             author: extracted.author || "",
             description: candidate.description || "",
             content: extracted.content,
+            contentSource: extracted.contentSource || (blog.type === "atom-fulltext" ? "atom-summary" : undefined),
           });
 
           // Mark candidate as seen only after confirming qualification and inclusion
@@ -1607,6 +1848,9 @@ export {
   parseAnthropicEngineeringIndex,
   parseClaudeBlogIndex,
   parseFullTextBlogRss,
+  parseFullTextAtomFeed,
+  decodeXmlLayer,
+  decodeHtmlEntities,
   parseBlogRssIndex,
   extractGoogleBlogArticleContent,
 };

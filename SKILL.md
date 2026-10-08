@@ -325,7 +325,7 @@ The script outputs a single JSON blob with everything you need:
 - `config` — user's language and delivery preferences
 - `podcasts` — podcast episodes with full transcripts
 - `x` — builders with their recent tweets (text, URLs, bios)
-- `blogs` — official blog posts (Anthropic Engineering, Claude Blog, etc.)
+- `blogs` — articles from official company blogs (Anthropic, Google, etc.) and independent practitioner weblogs (Simon Willison, etc.)
 - `prompts` — the remix instructions to follow
 - `stats` — counts of episodes, tweets, and blog posts
 - `errors` — diagnostic errors or degradation warnings (do NOT ignore; check if feeds are missing or prompts fell back to local defaults)
@@ -382,7 +382,7 @@ Read the prompts from the `prompts` field in the JSON:
 - `prompts.digest_intro` — overall framing rules
 - `prompts.summarize_podcast` — how to remix podcast transcripts
 - `prompts.summarize_tweets` — how to remix tweets
-- `prompts.summarize_blogs` — how to summarize official blog posts
+- `prompts.summarize_blogs` — how to summarize official and practitioner blog posts
 - `prompts.translate` — how to translate to Chinese
 
 **Tweets (process first):** The `x` array has builders with tweets. Process one at a time:
@@ -390,9 +390,9 @@ Read the prompts from the `prompts` field in the JSON:
 2. Summarize their `tweets` using `prompts.summarize_tweets`
 3. Every tweet MUST include its `url` from the JSON
 
-**Blogs (process second):** The `blogs` array has articles from official blogs. Process one at a time:
+**Blogs (process second):** The `blogs` array has articles from official company blogs and independent practitioner weblogs. Process one at a time:
 1. Use `name` for the blog name and `title` for the headline
-2. Summarize each post using `prompts.summarize_blogs`
+2. Summarize each post using `prompts.summarize_blogs`, strictly distinguishing between the author's direct hands-on testing/benchmarks, quoting/reporting of external releases, and opinion/speculation
 3. Every blog post MUST include its direct `url` from the JSON
 
 **Podcast (process third):** The `podcasts` array has at most 1 episode. If present:
