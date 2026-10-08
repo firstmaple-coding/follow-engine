@@ -2,6 +2,8 @@
 
 # Follow Builders (Follow Engine Fork)
 
+> **Fork direction:** [Follow Engine Project Charter (中文)](docs/PROJECT-CHARTER.zh-CN.md) defines the capability radar, personal problem matching, small workflow experiments, and requirement-by-requirement acceptance criteria. These are project goals; implementation status is tracked separately below.
+
 An AI-powered digest that tracks top builders in AI — researchers, founders, PMs, and engineers who are actually building things — and delivers curated summaries of what they are publishing and discussing.
 
 > **Project Status (firstmaple-coding Fork):**
