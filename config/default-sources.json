@@ -60,6 +60,13 @@
       "indexUrl": "https://blog.google/technology/ai/rss/",
       "articleBaseUrl": "https://blog.google/",
       "fetchMethod": "http"
+    },
+    {
+      "name": "Simon Willison Weblog",
+      "type": "atom-fulltext",
+      "indexUrl": "https://simonwillison.net/tags/ai.atom",
+      "articleBaseUrl": "https://simonwillison.net/",
+      "fetchMethod": "http"
     }
   ],
   "x_accounts": [

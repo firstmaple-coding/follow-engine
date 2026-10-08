@@ -139,6 +139,28 @@ if (process.env.__GENERATE_FEED_MOCK_PRELOAD__ === '1') {
       return new Response(html, { status: 200 });
     }
 
+    // Simon Willison AI Atom feed mock
+    if (urlStr === 'https://simonwillison.net/tags/ai.atom') {
+      const freshDate = new Date().toISOString();
+      const body = 'Simon Willison commentary on local models and architecture. '.repeat(5);
+      const atom = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Simon Willison’s Weblog: ai</title>
+  <link href="https://simonwillison.net/tags/ai.atom" rel="self"/>
+  <link href="https://simonwillison.net/tags/ai/" rel="alternate"/>
+  <entry>
+    <title>Simon AI test article</title>
+    <link href="https://simonwillison.net/tags/ai.atom" rel="self"/>
+    <link href="https://simonwillison.net/2026/Oct/7/simon-ai-test/" rel="alternate"/>
+    <published>${freshDate}</published>
+    <updated>${freshDate}</updated>
+    <author><name>Simon Willison</name></author>
+    <summary type="html">&lt;p&gt;${body}&lt;a href="https://example.com/spec"&gt;spec link&lt;/a&gt;.&lt;/p&gt;&lt;blockquote&gt;&lt;p&gt;Quoted findings.&lt;/p&gt;&lt;/blockquote&gt;&lt;p&gt;Tags: &lt;a href="https://simonwillison.net/tags/ai/"&gt;ai&lt;/a&gt;&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+      return new Response(atom, { status: 200, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
+    }
+
     // X API User Lookup Mock
     if (urlStr.includes('api.x.com/2/users/by')) {
       const urlObj = new URL(urlStr);
@@ -245,12 +267,19 @@ function sha256(filePath) {
   }
 }
 
+let totalTests = 0;
+let passedTests = 0;
+let failedTests = 0;
+
 function runTest(name, fn) {
-  console.log(`\n[Test] ${name}`);
+  totalTests++;
+  console.log(`\n[Test ${totalTests}] ${name}`);
   try {
     fn();
+    passedTests++;
     console.log('  -> PASSED');
   } catch (err) {
+    failedTests++;
     console.error('  -> FAILED:', err.message);
     if (err.stack) console.error(err.stack);
     process.exitCode = 1;
@@ -258,11 +287,14 @@ function runTest(name, fn) {
 }
 
 async function runAsyncTest(name, fn) {
-  console.log(`\n[Test] ${name}`);
+  totalTests++;
+  console.log(`\n[Test ${totalTests}] ${name}`);
   try {
     await fn();
+    passedTests++;
     console.log('  -> PASSED');
   } catch (err) {
+    failedTests++;
     console.error('  -> FAILED:', err.message);
     if (err.stack) console.error(err.stack);
     process.exitCode = 1;
@@ -291,6 +323,7 @@ async function main() {
     parseAnthropicEngineeringIndex,
     parseClaudeBlogIndex,
     parseFullTextBlogRss,
+    parseFullTextAtomFeed,
     parseBlogRssIndex,
     extractGoogleBlogArticleContent
   } = await import(pathToFileURL(GENERATE_SCRIPT).href);
@@ -1251,6 +1284,428 @@ async function main() {
   });
 
   // --------------------------------------------------------------------------
+  // Simon Willison Weblog / Atom Feed Tests
+  // --------------------------------------------------------------------------
+  await runAsyncTest('parseFullTextAtomFeed selects alternate/omitted rel links, rejects foreign/non-alternate links, and decodes entities', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+    const errors = [];
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Simon Willison’s Weblog: ai</title>
+  <link href="https://simonwillison.net/tags/ai.atom" rel="self"/>
+  <link href="https://simonwillison.net/tags/ai/" rel="alternate"/>
+  <entry>
+    <title>Post &amp; Title 1 &lt;Verified&gt;</title>
+    <link href="https://simonwillison.net/tags/ai.atom" rel="self"/>
+    <link href="https://simonwillison.net/2026/Oct/7/post-alternate/" rel="alternate"/>
+    <published>2026-10-07T14:00:00Z</published>
+    <summary type="html">&lt;p&gt;Substantial text content for post 1 with &amp;quot;quotes&amp;quot; and enough text.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Post 2 with omitted rel</title>
+    <link href="https://simonwillison.net/2026/Oct/7/post-omitted-rel/"/>
+    <published>2026-10-07T13:00:00Z</published>
+    <summary type="html">&lt;p&gt;Substantial text content for post 2 with omitted rel attribute.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Post 3 with foreign domain</title>
+    <link href="https://evil-phishing.com/2026/Oct/7/phish/" rel="alternate"/>
+    <published>2026-10-07T12:00:00Z</published>
+    <summary type="html">&lt;p&gt;Phishing attempt content.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Post 4 with non-alternate rel</title>
+    <link href="https://simonwillison.net/audio.mp3" rel="enclosure"/>
+    <published>2026-10-07T11:00:00Z</published>
+    <summary type="html">&lt;p&gt;Non-alternate audio post.&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const articles = parseFullTextAtomFeed(xml, blog, errors);
+    assert.strictEqual(articles.length, 2, 'Should accept only the 2 valid articles with rel="alternate" or omitted rel');
+    assert.strictEqual(articles[0].url, 'https://simonwillison.net/2026/Oct/7/post-alternate/');
+    assert.strictEqual(articles[0].title, 'Post & Title 1 <Verified>');
+    assert.strictEqual(articles[1].url, 'https://simonwillison.net/2026/Oct/7/post-omitted-rel/');
+    assert(errors.some((e) => e.includes('Unexpected Atom article URL from Simon Willison Weblog: https://evil-phishing.com/')));
+    assert(errors.some((e) => e.includes('No alternate article link found in Atom entry for Simon Willison Weblog')));
+  });
+
+  await runAsyncTest('parseFullTextAtomFeed strictly uses published and never substitutes updated', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+    const errors = [];
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Article with both dates</title>
+    <link href="https://simonwillison.net/2026/Oct/7/both-dates/" rel="alternate"/>
+    <published>2026-10-07T10:00:00Z</published>
+    <updated>2026-10-08T00:00:00Z</updated>
+    <summary type="html">&lt;p&gt;Content with both dates present in entry element.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Article with missing published</title>
+    <link href="https://simonwillison.net/2026/Oct/7/missing-published/" rel="alternate"/>
+    <updated>2026-10-07T10:00:00Z</updated>
+    <summary type="html">&lt;p&gt;Content with missing published date.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Article with invalid published date</title>
+    <link href="https://simonwillison.net/2026/Oct/7/invalid-published/" rel="alternate"/>
+    <published>not-a-valid-date-stamp</published>
+    <updated>2026-10-07T10:00:00Z</updated>
+    <summary type="html">&lt;p&gt;Content with unparseable published date.&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const articles = parseFullTextAtomFeed(xml, blog, errors);
+    assert.strictEqual(articles.length, 1, 'Only entry with valid <published> date must be accepted');
+    assert.strictEqual(articles[0].publishedAt, '2026-10-07T10:00:00.000Z', 'Must use <published>, not <updated>');
+    assert(errors.some((e) => e.includes('Missing Atom publication date for https://simonwillison.net/2026/Oct/7/missing-published/')));
+    assert(errors.some((e) => e.includes('Invalid Atom publication date for https://simonwillison.net/2026/Oct/7/invalid-published/')));
+  });
+
+  await runAsyncTest('parseFullTextAtomFeed cleans content, preserves quotes, links, code, lists, and strips trailing tags navigation', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+    const errors = [];
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Full formatting test</title>
+    <link href="https://simonwillison.net/2026/Oct/7/formatting-test/" rel="alternate"/>
+    <published>2026-10-07T15:00:00Z</published>
+    <author><name>Simon Willison</name></author>
+    <summary type="html">&lt;p&gt;Check out the &lt;a href="https://arxiv.org/abs/2610.1234"&gt;research paper&lt;/a&gt; for details.&lt;/p&gt;
+&lt;blockquote&gt;&lt;p&gt;Direct citation of experimental methodology.&lt;/p&gt;&lt;/blockquote&gt;
+&lt;pre&gt;&lt;code&gt;model = AutoModel.from_pretrained("google/embeddinggemma-2")&lt;/code&gt;&lt;/pre&gt;
+&lt;ul&gt;&lt;li&gt;Benchmark 1: 98.2%&lt;/li&gt;&lt;li&gt;Benchmark 2: 91.5%&lt;/li&gt;&lt;/ul&gt;
+&lt;p&gt;Tags: &lt;a href="https://simonwillison.net/tags/ai/"&gt;ai&lt;/a&gt;, &lt;a href="https://simonwillison.net/tags/llms/"&gt;llms&lt;/a&gt;&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const articles = parseFullTextAtomFeed(xml, blog, errors);
+    assert.strictEqual(articles.length, 1);
+    const item = articles[0];
+    assert.strictEqual(item.author, 'Simon Willison');
+    assert.strictEqual(item.contentSource, 'atom-summary');
+    assert(item.content.includes('research paper (https://arxiv.org/abs/2610.1234)'), 'Preserves evidence link and anchor');
+    assert(item.content.includes('> Direct citation of experimental methodology.'), 'Preserves blockquote attribution');
+    assert(item.content.includes('model = AutoModel.from_pretrained("google/embeddinggemma-2")'), 'Preserves code block');
+    assert(item.content.includes('- Benchmark 1: 98.2%'), 'Preserves bullet list');
+    assert(!item.content.includes('Tags:'), 'Strips trailing tag navigation');
+    assert(!item.content.includes('<p>') && !item.content.includes('</p>'), 'Strips raw HTML tags');
+  });
+
+  await runAsyncTest('fetchBlogContent dispatches Atom feed directly without article detail network requests', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+    const articleUrl = 'https://simonwillison.net/2026/Oct/7/dispatch-test/';
+    const freshDate = new Date().toISOString();
+    const atomXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Dispatched Atom Post</title>
+    <link href="${articleUrl}" rel="alternate"/>
+    <published>${freshDate}</published>
+    <author><name>Simon Willison</name></author>
+    <summary type="html">&lt;p&gt;This is full text from the atom feed summary with enough characters for digest.&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const originalFetch = globalThis.fetch;
+    const fetchCalls = [];
+    try {
+      globalThis.fetch = async (requestUrl) => {
+        fetchCalls.push(String(requestUrl));
+        if (String(requestUrl) === blog.indexUrl) {
+          return new Response(atomXml, { status: 200, headers: { 'Content-Type': 'application/xml' } });
+        }
+        throw new Error(`Unexpected detail fetch request: ${requestUrl}`);
+      };
+
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const errors = [];
+      const results = await fetchBlogContent([blog], state, errors);
+
+      assert.strictEqual(results.length, 1);
+      assert.strictEqual(results[0].name, 'Simon Willison Weblog');
+      assert.strictEqual(results[0].url, articleUrl);
+      assert.strictEqual(results[0].contentSource, 'atom-summary');
+      assert.strictEqual(state.seenArticles[articleUrl] !== undefined, true, 'Article must be recorded in seenArticles');
+      assert.strictEqual(fetchCalls.length, 1, 'Only indexUrl should be fetched, zero detail page fetches');
+      assert.strictEqual(fetchCalls[0], blog.indexUrl);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await runAsyncTest('fetchBlogContent error disclosure, failure retryability, and dedup on second run for Atom feeds', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+    const invalidUrl = 'https://simonwillison.net/2026/Oct/7/initially-invalid/';
+    const freshDate = new Date().toISOString();
+
+    const badXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Initially Bad Date Post</title>
+    <link href="${invalidUrl}" rel="alternate"/>
+    <published>corrupted-date</published>
+    <summary type="html">&lt;p&gt;Substantive article content with enough length.&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const goodXml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Corrected Date Post</title>
+    <link href="${invalidUrl}" rel="alternate"/>
+    <published>${freshDate}</published>
+    <summary type="html">&lt;p&gt;Substantive article content with enough length.&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const originalFetch = globalThis.fetch;
+    try {
+      // Run 1: Fails parsing date, logs error, leaves article unseen so it is retryable
+      globalThis.fetch = async () => new Response(badXml, { status: 200, headers: { 'Content-Type': 'application/xml' } });
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const errors1 = [];
+      const run1 = await fetchBlogContent([blog], state, errors1);
+      assert.strictEqual(run1.length, 0);
+      assert(errors1.some((e) => e.includes('Invalid Atom publication date')));
+      assert.strictEqual(state.seenArticles[invalidUrl], undefined, 'Failed article must not be marked seen');
+
+      // Run 2: Corrected feed, should succeed and mark seen
+      globalThis.fetch = async () => new Response(goodXml, { status: 200, headers: { 'Content-Type': 'application/xml' } });
+      const errors2 = [];
+      const run2 = await fetchBlogContent([blog], state, errors2);
+      assert.strictEqual(run2.length, 1);
+      assert.strictEqual(state.seenArticles[invalidUrl] !== undefined, true, 'Succeeded article marked seen');
+
+      // Run 3: Second execution with same state must deduplicate and yield 0 new articles
+      const errors3 = [];
+      const run3 = await fetchBlogContent([blog], state, errors3);
+      assert.strictEqual(run3.length, 0, 'Deduplication must skip already seen article');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await runAsyncTest('parseFullTextAtomFeed regression: preserves Python indentation, comparison operators, escaped HTML entities, and resolves relative links', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+    const errors = [];
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Regression: Python code &amp; entities</title>
+    <link href="https://simonwillison.net/2026/Oct/8/code-entities-test/" rel="alternate"/>
+    <published>2026-10-08T10:00:00Z</published>
+    <author><name>Simon Willison</name></author>
+    <content type="html">&lt;p&gt;Prose with escaped HTML: &amp;lt;div id=&quot;root&quot;&amp;gt; and &amp;amp; symbols.&lt;/p&gt;
+&lt;p&gt;Inline code &lt;code&gt;if val &amp;lt; 10 and val &amp;gt; 0:&lt;/code&gt; check.&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;def calculate(val):
+    # Check comparison &amp;amp; bounds
+    if val &amp;lt; 10 and val &amp;gt; 0:
+        indent_four = True
+        if indent_four:
+            return &quot;&amp;lt;nested-result&amp;gt;&quot;
+    return None&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Relative link: &lt;a href=&quot;/2026/Oct/08/sub-doc/&quot;&gt;documentation&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;External evidence link: &lt;a href=&quot;https://arxiv.org/abs/2610.5678&quot;&gt;ArXiv paper&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Tags: &lt;a href=&quot;https://simonwillison.net/tags/python/&quot;&gt;python&lt;/a&gt;&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Summary source check</title>
+    <link href="https://simonwillison.net/2026/Oct/8/summary-source-test/" rel="alternate"/>
+    <published>2026-10-08T09:00:00Z</published>
+    <author><name>Simon Willison</name></author>
+    <summary type="html">&lt;p&gt;Article with only summary element provided in feed.&lt;/p&gt;</summary>
+  </entry>
+</feed>`;
+
+    const articles = parseFullTextAtomFeed(xml, blog, errors);
+    assert.strictEqual(articles.length, 2);
+    assert.strictEqual(errors.length, 0);
+
+    const [item1, item2] = articles;
+
+    // Check contentSource field accuracy
+    assert.strictEqual(item1.contentSource, 'atom-content', 'Should be atom-content when <content> element is present');
+    assert.strictEqual(item2.contentSource, 'atom-summary', 'Should be atom-summary when <summary> element is present');
+
+    // Check escaped HTML in prose is preserved and not stripped as tags
+    assert(item1.content.includes('<div id="root"> and & symbols.'), 'Escaped HTML entities in prose must not be stripped as tags');
+
+    // Check inline code angle brackets preserved
+    assert(item1.content.includes('`if val < 10 and val > 0:`'), 'Inline code must preserve comparison operators');
+
+    // Check Python indentation strictly preserved
+    assert(item1.content.includes('    # Check comparison & bounds'), 'Must preserve 4-space indentation on comments');
+    assert(item1.content.includes('    if val < 10 and val > 0:'), 'Must preserve comparison operators and 4-space indentation in Python code');
+    assert(item1.content.includes('        indent_four = True'), 'Must preserve 8-space indentation in nested block');
+    assert(item1.content.includes('        if indent_four:'), 'Must preserve 8-space indentation');
+    assert(item1.content.includes('            return "<nested-result>"'), 'Must preserve 12-space indentation and angle brackets in string');
+
+    // Check relative URL converted to absolute URL
+    assert(item1.content.includes('documentation (https://simonwillison.net/2026/Oct/08/sub-doc/)'), 'Relative link must be resolved to full URL against article URL');
+
+    // Check external link preserved
+    assert(item1.content.includes('ArXiv paper (https://arxiv.org/abs/2610.5678)'), 'External link must be preserved');
+
+    // Check tags stripped
+    assert(!item1.content.includes('Tags:'), 'Trailing tag navigation must be stripped');
+  });
+
+  await runAsyncTest('parseFullTextAtomFeed regression: plain XML-escaped, tight CDATA, and whitespace-indented CDATA produce identical content with preserved indentation, angle brackets, and evidence links', async () => {
+    const blog = {
+      name: 'Simon Willison Weblog',
+      type: 'atom-fulltext',
+      indexUrl: 'https://simonwillison.net/tags/ai.atom',
+      articleBaseUrl: 'https://simonwillison.net/',
+      fetchMethod: 'http',
+    };
+
+    const xmlPlain = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Plain XML Escaped</title>
+    <link href="https://simonwillison.net/2026/Oct/8/plain-escaped/" rel="alternate"/>
+    <published>2026-10-08T10:00:00Z</published>
+    <author><name>Simon Willison</name></author>
+    <content type="html">&lt;p&gt;Check out the &lt;a href=&quot;https://arxiv.org/abs/2610.1234&quot;&gt;research paper&lt;/a&gt; for details.&lt;/p&gt;
+&lt;pre&gt;&lt;code&gt;def solve(items):
+    # Bound check &amp;amp; comparison
+    if item &amp;lt; 10 and item &amp;gt; 0:
+        indent_four = True
+        if indent_four:
+            return &quot;&amp;lt;nested-result&amp;gt;&quot;
+    return None&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;Relative: &lt;a href=&quot;/2026/Oct/08/sub-doc/&quot;&gt;sub documentation&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Tags: &lt;a href=&quot;https://simonwillison.net/tags/python/&quot;&gt;python&lt;/a&gt;&lt;/p&gt;</content>
+  </entry>
+</feed>`;
+
+    const xmlTightCdata = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Tight CDATA</title>
+    <link href="https://simonwillison.net/2026/Oct/8/tight-cdata/" rel="alternate"/>
+    <published>2026-10-08T10:00:00Z</published>
+    <author><name>Simon Willison</name></author>
+    <content type="html"><![CDATA[<p>Check out the <a href="https://arxiv.org/abs/2610.1234">research paper</a> for details.</p>
+<pre><code>def solve(items):
+    # Bound check &amp; comparison
+    if item &lt; 10 and item &gt; 0:
+        indent_four = True
+        if indent_four:
+            return "&lt;nested-result&gt;"
+    return None</code></pre>
+<p>Relative: <a href="/2026/Oct/08/sub-doc/">sub documentation</a>.</p>
+<p>Tags: <a href="https://simonwillison.net/tags/python/">python</a></p>]]></content>
+  </entry>
+</feed>`;
+
+    const xmlIndentedCdata = `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Indented CDATA</title>
+    <link href="https://simonwillison.net/2026/Oct/8/indented-cdata/" rel="alternate"/>
+    <published>2026-10-08T10:00:00Z</published>
+    <author><name>Simon Willison</name></author>
+    <content type="html">
+      <![CDATA[
+<p>Check out the <a href="https://arxiv.org/abs/2610.1234">research paper</a> for details.</p>
+<pre><code>def solve(items):
+    # Bound check &amp; comparison
+    if item &lt; 10 and item &gt; 0:
+        indent_four = True
+        if indent_four:
+            return "&lt;nested-result&gt;"
+    return None</code></pre>
+<p>Relative: <a href="/2026/Oct/08/sub-doc/">sub documentation</a>.</p>
+<p>Tags: <a href="https://simonwillison.net/tags/python/">python</a></p>
+      ]]>
+    </content>
+  </entry>
+</feed>`;
+
+    const errorsPlain = [];
+    const errorsTight = [];
+    const errorsIndented = [];
+
+    const resPlain = parseFullTextAtomFeed(xmlPlain, blog, errorsPlain);
+    const resTight = parseFullTextAtomFeed(xmlTightCdata, blog, errorsTight);
+    const resIndented = parseFullTextAtomFeed(xmlIndentedCdata, blog, errorsIndented);
+
+    assert.strictEqual(errorsPlain.length, 0);
+    assert.strictEqual(errorsTight.length, 0);
+    assert.strictEqual(errorsIndented.length, 0);
+
+    assert.strictEqual(resPlain.length, 1);
+    assert.strictEqual(resTight.length, 1);
+    assert.strictEqual(resIndented.length, 1);
+
+    const cPlain = resPlain[0].content;
+    const cTight = resTight[0].content;
+    const cIndented = resIndented[0].content;
+
+    // 1. All three must produce identical content
+    assert.strictEqual(cPlain, cTight, 'Plain XML-escaped and tight CDATA must produce bitwise identical content');
+    assert.strictEqual(cTight, cIndented, 'Tight CDATA and whitespace-indented CDATA must produce bitwise identical content');
+
+    // 2. Preserves evidence links
+    assert(cPlain.includes('research paper (https://arxiv.org/abs/2610.1234)'), 'Evidence link must be preserved');
+
+    // 3. Preserves relative links resolved to article base URL
+    assert(cPlain.includes('sub documentation (https://simonwillison.net/2026/Oct/08/sub-doc/)'), 'Relative link must be resolved');
+
+    // 4. Preserves code indentation and angle brackets/comparison operators
+    assert(cPlain.includes('def solve(items):'));
+    assert(cPlain.includes('    # Bound check & comparison'), 'Preserves 4-space indent on comment');
+    assert(cPlain.includes('    if item < 10 and item > 0:'), 'Preserves 4-space indent and comparison operators');
+    assert(cPlain.includes('        indent_four = True'), 'Preserves 8-space indent');
+    assert(cPlain.includes('        if indent_four:'), 'Preserves 8-space indent');
+    assert(cPlain.includes('            return "<nested-result>"'), 'Preserves 12-space indent and string angle brackets');
+
+    // 5. Strips trailing tags
+    assert(!cPlain.includes('Tags:'), 'Strips tags navigation');
+  });
+
+  // --------------------------------------------------------------------------
   // Verify real workspace files remain 100% untouched
   // --------------------------------------------------------------------------
   runTest('Workspace root files remain 100% bitwise untouched', () => {
@@ -1261,7 +1716,7 @@ async function main() {
   });
 
   console.log('\n========================================');
-  console.log('FEED TEST SUITE COMPLETE: All tests passed.');
+  console.log(`FEED TEST SUITE SUMMARY: ${passedTests}/${totalTests} passed (${failedTests} failed).`);
   console.log('========================================');
 }
 
