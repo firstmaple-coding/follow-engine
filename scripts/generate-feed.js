@@ -830,6 +830,81 @@ function parseFullTextBlogRss(xml, blog, errors = []) {
   return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
 }
 
+// RSS summary mode carries an authoritative publication date, original link, and concise summary description.
+// Does not fetch article detail pages (avoiding Cloudflare/403 blocks), and tags contentSource as "rss-summary".
+function parseSummaryBlogRss(
+  xml,
+  blog,
+  errors = [],
+  cutoff = new Date(Date.now() - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000),
+) {
+  const articles = [];
+  const seenUrls = new Set();
+  const expectedHost = new URL(blog.articleBaseUrl).hostname;
+  const cutoffDate =
+    cutoff instanceof Date
+      ? cutoff
+      : new Date(cutoff || Date.now() - BLOG_LOOKBACK_HOURS * 60 * 60 * 1000);
+  const readField = (block, tag) => {
+    const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    let value = block.match(new RegExp(`<${escaped}>([\\s\\S]*?)<\\/${escaped}>`, "i"))?.[1] || "";
+    value = value.trim();
+    if (value.startsWith("<![CDATA[") && value.endsWith("]]>")) {
+      return value.slice(9, -3).trim();
+    }
+    return decodeXmlLayer(value);
+  };
+
+  for (const match of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const block = match[1];
+    const title = decodeHtmlEntities(readField(block, "title"));
+    const rawLink = decodeHtmlEntities(readField(block, "link"));
+    const publishedAt = readField(block, "pubDate");
+    const descriptionRaw = readField(block, "description");
+    let url;
+    try {
+      url = new URL(rawLink);
+    } catch {
+      errors.push(`Blog: Invalid RSS article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+    if (url.protocol !== "https:" || url.hostname !== expectedHost) {
+      errors.push(`Blog: Unexpected RSS article URL from ${blog.name}: ${rawLink}`);
+      continue;
+    }
+    if (seenUrls.has(url.href)) continue;
+    seenUrls.add(url.href);
+    if (!publishedAt || Number.isNaN(new Date(publishedAt).getTime())) {
+      errors.push(`Blog: Missing or invalid RSS publication date for ${url.href}`);
+      continue;
+    }
+    const pubDate = new Date(publishedAt);
+    const content = decodeHtmlEntities(descriptionRaw
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim());
+    if (!content) {
+      // Historical empty summaries outside the lookback window do not affect this period's completeness.
+      // Recent empty summaries within the lookback window must still be reported.
+      if (pubDate >= cutoffDate) {
+        errors.push(`Blog: Missing RSS summary description for ${url.href}`);
+      }
+      continue;
+    }
+    articles.push({
+      title,
+      url: url.href,
+      publishedAt,
+      description: content,
+      content,
+      contentSource: "rss-summary",
+    });
+  }
+  return articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+}
+
 // Atom 1.0 feed parser with full-text summary or content.
 // Extracts title, url, publishedAt, content, and contentSource without requesting article details.
 function parseFullTextAtomFeed(xml, blog, errors = []) {
@@ -1419,6 +1494,8 @@ async function fetchBlogContent(blogs, state, errors) {
         candidates = parseFullTextBlogRss(indexHtml, blog, errors);
       } else if (blog.type === "atom-fulltext") {
         candidates = parseFullTextAtomFeed(indexHtml, blog, errors);
+      } else if (blog.type === "rss-summary") {
+        candidates = parseSummaryBlogRss(indexHtml, blog, errors, cutoff);
       } else if (blog.type === "rss-detail") {
         candidates = parseBlogRssIndex(indexHtml, blog, errors);
       } else if (blog.indexUrl.includes("anthropic.com")) {
@@ -1467,7 +1544,7 @@ async function fetchBlogContent(blogs, state, errors) {
 
         try {
           let extracted;
-          if (blog.type === "rss-fulltext" || blog.type === "atom-fulltext") {
+          if (blog.type === "rss-fulltext" || blog.type === "atom-fulltext" || blog.type === "rss-summary") {
             extracted = candidate; // The publisher's RSS or Atom feed already contains full text or summary.
           } else {
             attemptedArticleFetches++;
@@ -1555,7 +1632,7 @@ async function fetchBlogContent(blogs, state, errors) {
             author: extracted.author || "",
             description: candidate.description || "",
             content: extracted.content,
-            contentSource: extracted.contentSource || (blog.type === "atom-fulltext" ? "atom-summary" : undefined),
+            contentSource: extracted.contentSource || (blog.type === "atom-fulltext" ? "atom-summary" : blog.type === "rss-summary" ? "rss-summary" : undefined),
           });
 
           // Mark candidate as seen only after confirming qualification and inclusion
@@ -1848,6 +1925,7 @@ export {
   parseAnthropicEngineeringIndex,
   parseClaudeBlogIndex,
   parseFullTextBlogRss,
+  parseSummaryBlogRss,
   parseFullTextAtomFeed,
   decodeXmlLayer,
   decodeHtmlEntities,

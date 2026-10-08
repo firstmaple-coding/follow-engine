@@ -128,6 +128,14 @@ if (process.env.__GENERATE_FEED_MOCK_PRELOAD__ === '1') {
       return new Response(rss, { status: 200, headers: { 'Content-Type': 'application/rss+xml' } });
     }
 
+    // OpenAI News summary RSS mock
+    if (urlStr === 'https://openai.com/news/rss.xml') {
+      const freshDate = new Date().toUTCString();
+      const desc = 'OpenAI news summary description announcing fresh AI developments.';
+      const rss = `<rss version="2.0"><channel><item><title><![CDATA[Introducing GPT-5.5]]></title><link>https://openai.com/index/introducing-gpt-5-5</link><pubDate>${freshDate}</pubDate><description><![CDATA[${desc}]]></description></item></channel></rss>`;
+      return new Response(rss, { status: 200, headers: { 'Content-Type': 'application/rss+xml' } });
+    }
+
     // Google AI Blog RSS index and article detail mocks
     if (urlStr === 'https://blog.google/technology/ai/rss/') {
       const rss = `<rss><channel><item><title>Google AI article</title><link>https://blog.google/innovation-and-ai/technology/ai/test-article/</link><pubDate>${new Date().toUTCString()}</pubDate><description>Official AI update</description></item></channel></rss>`;
@@ -323,6 +331,7 @@ async function main() {
     parseAnthropicEngineeringIndex,
     parseClaudeBlogIndex,
     parseFullTextBlogRss,
+    parseSummaryBlogRss,
     parseFullTextAtomFeed,
     parseBlogRssIndex,
     extractGoogleBlogArticleContent
@@ -1703,6 +1712,213 @@ async function main() {
 
     // 5. Strips trailing tags
     assert(!cPlain.includes('Tags:'), 'Strips tags navigation');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 28: parseSummaryBlogRss unit test with CDATA, plain XML, entities, and order
+  // --------------------------------------------------------------------------
+  await runAsyncTest('parseSummaryBlogRss extracts title, https URL, pubDate, and clean description with contentSource rss-summary', async () => {
+    const blog = {
+      name: 'OpenAI News',
+      type: 'rss-summary',
+      indexUrl: 'https://openai.com/news/rss.xml',
+      articleBaseUrl: 'https://openai.com/',
+      fetchMethod: 'http',
+    };
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title><![CDATA[How Oracle &amp; OpenAI collaborate]]></title>
+      <link>https://openai.com/index/oracle</link>
+      <pubDate>Thu, 08 Oct 2026 16:00:00 GMT</pubDate>
+      <description><![CDATA[Across recruiting and engineering, workflows run on <p>ChatGPT <b>Work</b></p>.]]></description>
+    </item>
+    <item>
+      <title>Unwrapped &quot;plain&quot; title &amp; description</title>
+      <link>https://openai.com/index/plain-post</link>
+      <pubDate>Wed, 07 Oct 2026 12:00:00 GMT</pubDate>
+      <description>Plain text description with &lt;b&gt;escaped&lt;/b&gt; entity.</description>
+    </item>
+    <item>
+      <title>Older Item for Order Check</title>
+      <link>https://openai.com/index/older-post</link>
+      <pubDate>Tue, 06 Oct 2026 08:00:00 GMT</pubDate>
+      <description>Older update description.</description>
+    </item>
+  </channel>
+</rss>`;
+
+    const errors = [];
+    const articles = parseSummaryBlogRss(xml, blog, errors);
+    assert.strictEqual(errors.length, 0);
+    assert.strictEqual(articles.length, 3);
+
+    const [item1, item2, item3] = articles;
+
+    // Verify item 1
+    assert.strictEqual(item1.title, 'How Oracle & OpenAI collaborate');
+    assert.strictEqual(item1.url, 'https://openai.com/index/oracle');
+    assert.strictEqual(item1.publishedAt, 'Thu, 08 Oct 2026 16:00:00 GMT');
+    assert.strictEqual(item1.contentSource, 'rss-summary');
+    assert.strictEqual(item1.description, 'Across recruiting and engineering, workflows run on ChatGPT Work .');
+    assert.strictEqual(item1.content, item1.description);
+
+    // Verify item 2
+    assert.strictEqual(item2.title, 'Unwrapped "plain" title & description');
+    assert.strictEqual(item2.url, 'https://openai.com/index/plain-post');
+    assert.strictEqual(item2.contentSource, 'rss-summary');
+    assert.strictEqual(item2.description, 'Plain text description with escaped entity.');
+
+    // Verify chronological order (newest first)
+    assert(new Date(item1.publishedAt) > new Date(item2.publishedAt));
+    assert(new Date(item2.publishedAt) > new Date(item3.publishedAt));
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 29: parseSummaryBlogRss error boundary and recent vs historical summary scoping
+  // --------------------------------------------------------------------------
+  await runAsyncTest('parseSummaryBlogRss scopes empty description errors to recent items while reporting date anomalies and invalid URLs', async () => {
+    const blog = {
+      name: 'OpenAI News',
+      type: 'rss-summary',
+      indexUrl: 'https://openai.com/news/rss.xml',
+      articleBaseUrl: 'https://openai.com/',
+      fetchMethod: 'http',
+    };
+    const now = new Date();
+    const freshDate = now.toUTCString();
+    const historicalDate = new Date(now.getTime() - 120 * 3600 * 1000).toUTCString(); // 120h old (> 72h cutoff)
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Off-site Link</title>
+      <link>https://evil.com/phishing</link>
+      <pubDate>${freshDate}</pubDate>
+      <description>Summary text</description>
+    </item>
+    <item>
+      <title>Non-HTTPS Link</title>
+      <link>http://openai.com/insecure</link>
+      <pubDate>${freshDate}</pubDate>
+      <description>Summary text</description>
+    </item>
+    <item>
+      <title>Invalid PubDate</title>
+      <link>https://openai.com/index/bad-date</link>
+      <pubDate>not-a-real-date</pubDate>
+      <description>Summary text</description>
+    </item>
+    <item>
+      <title>Recent Missing Description</title>
+      <link>https://openai.com/index/recent-no-desc</link>
+      <pubDate>${freshDate}</pubDate>
+      <description></description>
+    </item>
+    <item>
+      <title>Historical Missing Description</title>
+      <link>https://openai.com/index/historical-no-desc</link>
+      <pubDate>${historicalDate}</pubDate>
+      <description></description>
+    </item>
+    <item>
+      <title>Duplicate 1</title>
+      <link>https://openai.com/index/dup-test</link>
+      <pubDate>${freshDate}</pubDate>
+      <description>First duplicate</description>
+    </item>
+    <item>
+      <title>Duplicate 2</title>
+      <link>https://openai.com/index/dup-test</link>
+      <pubDate>${freshDate}</pubDate>
+      <description>Second duplicate</description>
+    </item>
+  </channel>
+</rss>`;
+
+    const errors = [];
+    const articles = parseSummaryBlogRss(xml, blog, errors);
+    assert.strictEqual(articles.length, 1, 'Only the single valid non-duplicate article should be kept');
+    assert.strictEqual(articles[0].url, 'https://openai.com/index/dup-test');
+
+    // 1. Invalid URLs are flagged
+    assert(errors.some((e) => e.includes('Unexpected RSS article URL') && e.includes('evil.com')));
+    assert(errors.some((e) => e.includes('Unexpected RSS article URL') && e.includes('http://openai.com')));
+
+    // 2. Date anomalies are NOT hidden
+    assert(errors.some((e) => e.includes('Missing or invalid RSS publication date') && e.includes('/bad-date')));
+
+    // 3. Recent empty summary reports error
+    assert(errors.some((e) => e.includes('Missing RSS summary description') && e.includes('/recent-no-desc')));
+
+    // 4. Historical empty summary does NOT report error (does not pollute digest errors)
+    assert(!errors.some((e) => e.includes('/historical-no-desc')), 'Historical empty summaries must not report errors or affect digest completeness');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 30: fetchBlogContent dispatches rss-summary without detail page requests
+  // --------------------------------------------------------------------------
+  await runAsyncTest('fetchBlogContent dispatches rss-summary directly without article detail network requests', async () => {
+    const blog = {
+      name: 'OpenAI News',
+      type: 'rss-summary',
+      indexUrl: 'https://openai.com/news/rss.xml',
+      articleBaseUrl: 'https://openai.com/',
+      fetchMethod: 'http',
+    };
+    const now = new Date();
+    const freshDate = now.toUTCString();
+    const oldDate = new Date(now.getTime() - 80 * 3600 * 1000).toUTCString(); // 80h old (> 72h)
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title><![CDATA[Fresh Announcement]]></title>
+      <link>https://openai.com/index/fresh-article</link>
+      <pubDate>${freshDate}</pubDate>
+      <description><![CDATA[Fresh announcement summary text for testing dispatch.]]></description>
+    </item>
+    <item>
+      <title><![CDATA[Stale Announcement]]></title>
+      <link>https://openai.com/index/stale-article</link>
+      <pubDate>${oldDate}</pubDate>
+      <description><![CDATA[Stale announcement summary text.]]></description>
+    </item>
+  </channel>
+</rss>`;
+
+    const originalFetch = globalThis.fetch;
+    let fetchCount = 0;
+    const requestedUrls = [];
+
+    globalThis.fetch = async (url) => {
+      fetchCount++;
+      requestedUrls.push(String(url));
+      return new Response(xml, { status: 200, headers: { 'Content-Type': 'application/rss+xml' } });
+    };
+
+    const state = { seenArticles: {} };
+    try {
+      const errors = [];
+      const results = await fetchBlogContent([blog], state, errors);
+
+      assert.strictEqual(fetchCount, 1, 'Only index RSS URL should be fetched; zero article detail requests allowed');
+      assert.strictEqual(requestedUrls[0], 'https://openai.com/news/rss.xml');
+      assert.strictEqual(results.length, 1, 'Only fresh article should be returned');
+      assert.strictEqual(results[0].title, 'Fresh Announcement');
+      assert.strictEqual(results[0].contentSource, 'rss-summary');
+      assert.strictEqual(results[0].url, 'https://openai.com/index/fresh-article');
+      assert(state.seenArticles['https://openai.com/index/fresh-article'], 'Fresh article must be marked seen');
+      assert(state.seenArticles['https://openai.com/index/stale-article'], 'Stale article must be marked seen to skip future scans');
+
+      // Second run: deduplication check
+      const errors2 = [];
+      const results2 = await fetchBlogContent([blog], state, errors2);
+      assert.strictEqual(results2.length, 0, 'Already seen articles must be skipped');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   // --------------------------------------------------------------------------

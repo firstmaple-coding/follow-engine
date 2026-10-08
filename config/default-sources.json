@@ -62,6 +62,13 @@
       "fetchMethod": "http"
     },
     {
+      "name": "OpenAI News",
+      "type": "rss-summary",
+      "indexUrl": "https://openai.com/news/rss.xml",
+      "articleBaseUrl": "https://openai.com/",
+      "fetchMethod": "http"
+    },
+    {
       "name": "Simon Willison Weblog",
       "type": "atom-fulltext",
       "indexUrl": "https://simonwillison.net/tags/ai.atom",

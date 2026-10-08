@@ -57,12 +57,13 @@ These commands keep generated feed and state files in `.runtime/`, which is igno
 
 ## Sources & Boundaries
 
-### Blog & Practitioner Sources (5 configured)
+### Blog & Practitioner Sources (6 configured)
 - **Official Blogs**:
   - [Anthropic Engineering](https://www.anthropic.com/engineering) — technical deep dives from the Anthropic team
   - [Claude Blog](https://claude.com/blog) (and `/resources/articles`) — product announcements, research, and technical guides
   - [GitHub Engineering](https://github.blog/engineering/) — engineering articles discovered from its official full-text RSS feed
   - [Google AI Blog](https://blog.google/innovation-and-ai/technology/ai/) — AI updates from Google's official RSS feed, with article-page text extraction
+  - [OpenAI News](https://openai.com/news/) — official product and research announcements parsed from its RSS feed in summary mode
 - **Independent Practitioner Weblog**:
   - [Simon Willison Weblog](https://simonwillison.net/tags/ai/) — AI tagged entries and content parsed from the official Atom feed, covering hands-on experiments, architectural reflections, and evidence links
 
