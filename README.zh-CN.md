@@ -57,12 +57,13 @@ node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-fe
 
 ## 信息源与依赖说明
 
-### 博客与实践者来源（已配置 5 个）
+### 博客与实践者来源（已配置 6 个）
 - **官方博客**：
   - [Anthropic Engineering](https://www.anthropic.com/engineering) — Anthropic 团队的技术深度文章
   - [Claude Blog](https://claude.com/blog)（以及 `/resources/articles`）— Claude 的产品公告、研究与技术指南
   - [GitHub Engineering](https://github.blog/engineering/) — 通过官方全文 RSS 发现的工程技术文章
   - [Google AI Blog](https://blog.google/innovation-and-ai/technology/ai/) — 通过官方 RSS 发现 AI 动态，再从原文页面提取正文
+  - [OpenAI News](https://openai.com/news/) — 通过官方 RSS 发现产品与研究公告，使用摘要模式接入
 - **独立实践者博客**：
   - [Simon Willison Weblog](https://simonwillison.net/tags/ai/) — 通过官方 Atom 订阅获取 AI 标签动态与正文，覆盖独立实测、架构思考与证据链接
 

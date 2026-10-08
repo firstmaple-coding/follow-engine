@@ -392,7 +392,7 @@ Read the prompts from the `prompts` field in the JSON:
 
 **Blogs (process second):** The `blogs` array has articles from official company blogs and independent practitioner weblogs. Process one at a time:
 1. Use `name` for the blog name and `title` for the headline
-2. Summarize each post using `prompts.summarize_blogs`, strictly distinguishing between the author's direct hands-on testing/benchmarks, quoting/reporting of external releases, and opinion/speculation
+2. Summarize each post using `prompts.summarize_blogs`, strictly distinguishing between the author's direct hands-on testing/benchmarks, quoting/reporting of external releases, and opinion/speculation. For entries with feed summaries (`contentSource: "rss-summary"` or brief feed descriptions), explicitly state "依据官方 RSS 摘要，未读取全文" (or "Based on official RSS summary; full article text was not fetched"), do not treat short summaries as full text, do not force direct quotes, do not enforce any word count floor, and state only what the source explicitly confirms
 3. Every blog post MUST include its direct `url` from the JSON
 
 **Podcast (process third):** The `podcasts` array has at most 1 episode. If present:
