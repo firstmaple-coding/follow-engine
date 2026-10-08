@@ -7,7 +7,7 @@
 > **项目现状与 Fork 说明 (firstmaple-coding Fork)：**
 > 本仓库是 [zarazhangrui/follow-builders](https://github.com/zarazhangrui/follow-builders) 的增强 Fork 版本。
 >
-> - **已验收的手动流程（无需付费信源 API 密钥）：** 已在 Work 模式本地项目中完成中文博客早报的全流程验收。流程执行 72 小时时效校验，将运行数据写入 `.runtime/`，并使用 `.agents/skills/daily-blog-digest/SKILL.md`。Claude Blog 的近期文章正文提取和 GitHub Engineering 的官方全文 RSS 已实测；Anthropic Engineering 已配置且索引请求完成，但当次没有符合时效的新文章，其详情页提取尚未实测。
+> - **已验收的手动流程（无需付费信源 API 密钥）：** 已在 Work 模式本地项目中完成中文博客早报的全流程验收。流程执行 72 小时时效校验，将运行数据写入 `.runtime/`，并使用 `.agents/skills/daily-blog-digest/SKILL.md`。Claude Blog 和 GitHub Engineering 已用近期文章验收。Google AI Blog 的官方 RSS 与正文提取已通过在线 dry-run，尚待在 Work 模式验收早报；Anthropic Engineering 的详情页提取仍待有新文章时实测。
 > - **各模块依赖边界说明（客观披露）：**
 >   - **X / Twitter 抓取：** X 生成器需要 `X_BEARER_TOKEN`；默认全量生成器缺少该值时会退出，`--blogs-only` 模式不会运行 X。
 >   - **播客抓取：** 转录依赖 `POD2TXT_API_KEY`；默认全量生成器缺少该值时会退出，`--blogs-only` 模式不会运行播客。YouTube 官方 API `captions.download` 要求对视频有编辑权限，不能直接作为通用第三方视频字幕抓取方案。
@@ -19,7 +19,7 @@
 
 已验收流程在本地聊天中按需生成中文博客摘要。仓库还保留了 X、播客与交付组件，但它们有各自的依赖：
 
-- **官方技术博客：** Claude Blog 的正文提取、GitHub Engineering 的官方全文 RSS 和本地早报已实测；Anthropic Engineering 仍待有符合时效的文章时验证详情提取。
+- **官方技术博客：** Claude Blog 和 GitHub Engineering 已在本地早报中验收；Google AI Blog 的正文提取通过在线 dry-run。Anthropic Engineering 仍待有符合时效的文章时验证详情提取。
 - **X 上的 AI 建造者：** 26 位顶尖 AI 建造者的核心观点与讨论（需配置 `X_BEARER_TOKEN`）。
 - **精选播客：** 6 档顶尖 AI 播客节目的关键洞察（需配置 `POD2TXT_API_KEY`）。
 - **语言：** 手动博客 Skill 已以简体中文验收；底层预处理脚本也接受英文和中英双语配置。
@@ -57,10 +57,11 @@ node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-fe
 
 ## 信息源与依赖说明
 
-### 官方博客（已配置 3 个）
+### 官方博客（已配置 4 个）
 - [Anthropic Engineering](https://www.anthropic.com/engineering) — Anthropic 团队的技术深度文章
 - [Claude Blog](https://claude.com/blog)（以及 `/resources/articles`）— Claude 的产品公告、研究与技术指南
 - [GitHub Engineering](https://github.blog/engineering/) — 通过官方全文 RSS 发现的工程技术文章
+- [Google AI Blog](https://blog.google/innovation-and-ai/technology/ai/) — 通过官方 RSS 发现 AI 动态，再从原文页面提取正文
 
 ### X 上的 AI 建造者（26 位）
 *需要配置 `X_BEARER_TOKEN`*

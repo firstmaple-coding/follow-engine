@@ -7,7 +7,7 @@ An AI-powered digest that tracks top builders in AI — researchers, founders, P
 > **Project Status (firstmaple-coding Fork):**
 > This repository is an active Fork of [zarazhangrui/follow-builders](https://github.com/zarazhangrui/follow-builders).
 >
-> - **Verified manual workflow (no paid source API keys):** A local Chinese blog digest has been tested end to end in Work mode. It checks article freshness (72-hour window), keeps generated data in `.runtime/`, and uses `.agents/skills/daily-blog-digest/SKILL.md`. Claude Blog article extraction and GitHub Engineering's full-text RSS were verified with current posts. Anthropic Engineering is configured and its index was fetched, but no fresh article was available to verify its detail extraction in that run.
+> - **Verified manual workflow (no paid source API keys):** A local Chinese blog digest has been tested end to end in Work mode. It checks article freshness (72-hour window), keeps generated data in `.runtime/`, and uses `.agents/skills/daily-blog-digest/SKILL.md`. Claude Blog and GitHub Engineering have been verified with current posts. Google AI Blog's RSS and article extraction passed a live dry-run; its Work-mode digest has not yet been accepted. Anthropic Engineering is configured, but its detail extraction awaits a fresh article.
 > - **Dependency Boundaries (Honest Disclosure):**
 >   - **X / Twitter:** The X generator requires `X_BEARER_TOKEN`. The full generator exits if it is missing; `--blogs-only` does not run X.
 >   - **Podcasts:** Transcript generation requires `POD2TXT_API_KEY`. The full generator exits if it is missing; `--blogs-only` does not run podcasts. YouTube Data API v3 `captions.download` requires permission to edit the video, so it is not a general way to download captions from third-party videos.
@@ -19,7 +19,7 @@ An AI-powered digest that tracks top builders in AI — researchers, founders, P
 
 The verified workflow produces an on-demand Chinese blog digest in the local chat. The repository also contains earlier X, podcast, and delivery components with separate dependencies:
 
-- **Official AI Blogs:** Claude Blog article extraction, GitHub Engineering full-text RSS, and the local digest were verified; Anthropic Engineering detail extraction awaits a fresh qualifying article.
+- **Official AI Blogs:** Claude Blog and GitHub Engineering were verified in the local digest; Google AI Blog article extraction passed a live dry-run. Anthropic Engineering detail extraction awaits a fresh qualifying article.
 - **AI Builders on X:** Key posts and insights from 26 curated AI builders (requires `X_BEARER_TOKEN`).
 - **Podcasts:** Episode summaries from 6 top AI podcasts (requires `POD2TXT_API_KEY`).
 - **Languages:** The manual blog Skill was verified in Chinese; the underlying preparation script also accepts English and bilingual settings.
@@ -57,10 +57,11 @@ These commands keep generated feed and state files in `.runtime/`, which is igno
 
 ## Sources & Boundaries
 
-### Official Blogs (3 configured)
+### Official Blogs (4 configured)
 - [Anthropic Engineering](https://www.anthropic.com/engineering) — technical deep dives from the Anthropic team
 - [Claude Blog](https://claude.com/blog) (and `/resources/articles`) — product announcements, research, and technical guides
 - [GitHub Engineering](https://github.blog/engineering/) — engineering articles discovered from its official full-text RSS feed
+- [Google AI Blog](https://blog.google/innovation-and-ai/technology/ai/) — AI updates from Google's official RSS feed, with article-page text extraction
 
 ### AI Builders on X (26)
 *Requires `X_BEARER_TOKEN`*

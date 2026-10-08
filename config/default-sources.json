@@ -52,6 +52,14 @@
       "indexUrl": "https://github.blog/engineering/feed/",
       "articleBaseUrl": "https://github.blog/",
       "fetchMethod": "http"
+    },
+    {
+      "name": "Google AI Blog",
+      "type": "rss-detail",
+      "detailFormat": "google-blog",
+      "indexUrl": "https://blog.google/technology/ai/rss/",
+      "articleBaseUrl": "https://blog.google/",
+      "fetchMethod": "http"
     }
   ],
   "x_accounts": [

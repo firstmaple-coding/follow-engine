@@ -128,6 +128,17 @@ if (process.env.__GENERATE_FEED_MOCK_PRELOAD__ === '1') {
       return new Response(rss, { status: 200, headers: { 'Content-Type': 'application/rss+xml' } });
     }
 
+    // Google AI Blog RSS index and article detail mocks
+    if (urlStr === 'https://blog.google/technology/ai/rss/') {
+      const rss = `<rss><channel><item><title>Google AI article</title><link>https://blog.google/innovation-and-ai/technology/ai/test-article/</link><pubDate>${new Date().toUTCString()}</pubDate><description>Official AI update</description></item></channel></rss>`;
+      return new Response(rss, { status: 200 });
+    }
+    if (urlStr === 'https://blog.google/innovation-and-ai/technology/ai/test-article/') {
+      const body = 'Google AI article body with substantive details for the daily digest. '.repeat(7);
+      const html = `<script type="application/ld+json">{"@type":"NewsArticle","headline":"Google AI article","datePublished":"${new Date().toISOString()}","mainEntityOfPage":"${urlStr}"}</script><article><div data-component="uni-article-body"><div><p>${body}</p></div><script data-catalog-id="newsletter-form">{}</script><p>Newsletter boilerplate</p></div></article>`;
+      return new Response(html, { status: 200 });
+    }
+
     // X API User Lookup Mock
     if (urlStr.includes('api.x.com/2/users/by')) {
       const urlObj = new URL(urlStr);
@@ -279,7 +290,9 @@ async function main() {
     extractClaudeBlogArticleContent,
     parseAnthropicEngineeringIndex,
     parseClaudeBlogIndex,
-    parseFullTextBlogRss
+    parseFullTextBlogRss,
+    parseBlogRssIndex,
+    extractGoogleBlogArticleContent
   } = await import(pathToFileURL(GENERATE_SCRIPT).href);
 
   // --------------------------------------------------------------------------
@@ -1182,6 +1195,56 @@ async function main() {
       assert.strictEqual(requests.length, 1, 'Full-text RSS must not require article detail fetches');
       assert(state.seenArticles['https://github.blog/engineering/fresh/'], 'Accepted article must be deduplicated');
       assert.strictEqual(state.seenArticles['https://github.blog/engineering/future/'], undefined, 'Future article must remain retryable');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await runAsyncTest('Google AI RSS verifies original links and extracts only article body', async () => {
+    const freshDate = new Date().toUTCString();
+    const url = 'https://blog.google/innovation-and-ai/technology/ai/fresh/';
+    const other = 'https://example.com/foreign/';
+    const item = (link) => `<item><title>AI &amp; developers</title><link>${link}</link><pubDate>${freshDate}</pubDate><description>News &amp; research</description></item>`;
+    const rss = `<rss><channel>${item(url)}${item(other)}</channel></rss>`;
+    const blog = { name: 'Google AI Blog', type: 'rss-detail', detailFormat: 'google-blog', indexUrl: 'https://blog.google/technology/ai/rss/', articleBaseUrl: 'https://blog.google/' };
+    const errors = [];
+    const candidates = parseBlogRssIndex(rss, blog, errors);
+    assert.strictEqual(candidates.length, 1);
+    assert.strictEqual(candidates[0].title, 'AI & developers');
+    assert(errors.some(e => e.includes('Unexpected RSS article URL')));
+    const body = 'Article text about building with AI and evaluating the results. '.repeat(7);
+    const html = (canonical) => `<script type="application/ld+json">{"@type":"NewsArticle","headline":"AI & developers","datePublished":"${new Date().toISOString()}","mainEntityOfPage":"${canonical}"}</script><article><div data-component="uni-article-body"><div><p>${body}</p></div><script data-catalog-id="newsletter-form">{}</script><p>Newsletter boilerplate</p></div><p>Related stories</p></article>`;
+    const extracted = extractGoogleBlogArticleContent(html(url));
+    assert(extracted.content.includes('evaluating the results'));
+    assert(!extracted.content.includes('Newsletter boilerplate'));
+    assert(!extracted.content.includes('Related stories'));
+
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async (requestUrl) => {
+        if (String(requestUrl) === blog.indexUrl) return new Response(rss, { status: 200 });
+        if (String(requestUrl) === url) return new Response(html(url), { status: 200 });
+        throw new Error(`Unexpected request: ${requestUrl}`);
+      };
+      const state = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const results = await fetchBlogContent([blog], state, []);
+      assert.strictEqual(results.length, 1);
+      assert.strictEqual(results[0].url, url);
+      assert.strictEqual(results[0].name, 'Google AI Blog');
+      assert(state.seenArticles[url]);
+
+      globalThis.fetch = async (requestUrl) => {
+        if (String(requestUrl) === blog.indexUrl) return new Response(rss, { status: 200 });
+        if (String(requestUrl) === url) return new Response(html(other), { status: 200 });
+        throw new Error(`Unexpected request: ${requestUrl}`);
+      };
+      const rejectedState = { seenTweets: {}, seenVideos: {}, seenArticles: {} };
+      const rejectionErrors = [];
+      const rejected = await fetchBlogContent([blog], rejectedState, rejectionErrors);
+      assert.strictEqual(rejected.length, 0);
+      assert.strictEqual(rejected.successfulSources, 0);
+      assert(rejectionErrors.some(e => e.includes('canonical URL mismatch')));
+      assert.strictEqual(rejectedState.seenArticles[url], undefined, 'Mismatched canonical link must stay retryable');
     } finally {
       globalThis.fetch = originalFetch;
     }
