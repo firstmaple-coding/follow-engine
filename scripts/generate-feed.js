@@ -1856,8 +1856,14 @@ async function main() {
     const blogFeed = {
       generatedAt: new Date().toISOString(),
       lookbackHours: BLOG_LOOKBACK_HOURS,
-      blogs: mergedBlogs,
-      stats: { blogPosts: mergedBlogs.length },
+      blogs: mergedBlogs.map(blog => ({
+        ...blog,
+        discovery: blogContent.some(fresh => fresh.url === blog.url) ? 'new' : 'retained',
+      })),
+      stats: {
+        blogPosts: mergedBlogs.length,
+        failedSources: blogContent.totalSources - blogContent.successfulSources,
+      },
       errors:
         errors.filter((e) => e.startsWith("Blog")).length > 0
           ? errors.filter((e) => e.startsWith("Blog"))

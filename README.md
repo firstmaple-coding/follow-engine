@@ -2,12 +2,14 @@
 
 # Follow Builders (Follow Engine Fork)
 
+> **PAUSED — 2026-10-25.** Work is preserved; no ongoing development or automatic digest delivery. Scheduled Actions triggers have been removed and the feed job is blocked, including manual dispatch. Resume only on the owner's explicit request. See [pause handoff and verification](docs/PROJECT-STATUS.md). Usage instructions below are retained for future resumption.
+
 > **Fork direction:** [Follow Engine Project Charter (中文)](docs/PROJECT-CHARTER.zh-CN.md) defines the capability radar, personal problem matching, small workflow experiments, and requirement-by-requirement acceptance criteria. These are project goals; implementation status is tracked separately below.
 
 An AI-powered digest that tracks top builders in AI — researchers, founders, PMs, and engineers who are actually building things — and delivers curated summaries of what they are publishing and discussing.
 
 > **Project Status (firstmaple-coding Fork):**
-> This repository is an active Fork of [zarazhangrui/follow-builders](https://github.com/zarazhangrui/follow-builders).
+> This repository is a paused Fork of [zarazhangrui/follow-builders](https://github.com/zarazhangrui/follow-builders).
 >
 > - **Verified manual workflow (no paid source API keys):** A local Chinese blog digest has been tested end to end in Work mode. It checks article freshness (72-hour window), keeps generated data in `.runtime/`, and uses `.agents/skills/daily-blog-digest/SKILL.md`. Claude Blog and GitHub Engineering have been verified with current posts. Google AI Blog's RSS and article extraction passed a live dry-run; its Work-mode digest has not yet been accepted. Anthropic Engineering is configured, but its detail extraction awaits a fresh article.
 > - **Dependency Boundaries (Honest Disclosure):**
@@ -40,17 +42,19 @@ You can run the official blog digest in a local Work project without paid source
 2. Open this repository as a local project in Work mode (or another local agent with filesystem access).
 3. Invoke the repository Skill at `.agents/skills/daily-blog-digest/SKILL.md`.
 4. Say **"生成今日早报"** or **"获取今日博客早报"**.
-5. The agent checks `.runtime/feed-blogs.json` for same-day freshness (reusing cached results within 24 hours to prevent rate limits), fetches fresh articles if needed, and outputs a verified Chinese digest with direct links and quotes.
+5. The daily runner refreshes on the first request of each America/New_York calendar day. Same-day feeds may be reused for at most 24 hours; every run rechecks the 72-hour article window and reports fetch time and counts.
+
+Daily output uses `prompts/personal-daily-digest.md`: up to three useful personal reading, organizing, writing or small-tool ideas, with access requirements and a try/observe/skip judgment. Zero items are valid; at most one small experiment per day. Enterprise case studies, benchmarks and infrastructure are excluded by default. A user-authorized three-day trial uses thread follow-ups and ends on day three; it does not enable GitHub Actions.
 
 ### 2. Running via CLI
 All commands run in the repository root and output to the Git-ignored `.runtime/` directory:
 
 ```bash
-# Step 1: Fetch fresh official blogs (writes to .runtime/feed-blogs.json)
-node scripts/generate-feed.js --blogs-only --feed-dir .runtime
+# Daily entry: refresh across local dates, reuse same-day data
+node scripts/run-daily-digest.js --feed-dir .runtime --timezone America/New_York --language zh
 
-# Step 2: Prepare digest JSON (checks 24h freshness, loads Chinese prompts)
-node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-feed-age-hours 24 --language zh
+# Latest / refresh / full rerun: always fetch
+node scripts/run-daily-digest.js --feed-dir .runtime --timezone America/New_York --language zh --force-refresh
 ```
 
 These commands keep generated feed and state files in `.runtime/`, which is ignored by Git. They do not modify the repository's tracked feed files.

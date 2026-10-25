@@ -2,6 +2,8 @@
 
 # 追踪建造者，而非网红 (Follow Engine Fork)
 
+> **已暂停 — 2026-10-25。** 保留代码与历史，停止持续开发和自动日报。已移除 Actions 定时触发，并阻止 Feed 作业执行（包括手动触发）。仅在用户明确要求恢复时重启。详见[收尾记录与核验边界](docs/PROJECT-STATUS.md)。下文使用说明保留供未来恢复参考。
+
 > **项目纲领：** [Follow Engine：从 AI 信息到真实工作流](docs/PROJECT-CHARTER.zh-CN.md)。后续功能取舍以此为依据：能力雷达、真实问题匹配、每周小实验与逐项验收。纲领描述目标，具体实现状态见下文。
 
 一个 AI 驱动的信息聚合工具，追踪 AI 领域最顶尖的建造者——研究员、创始人、产品经理和工程师——并将他们的最新动态整理成易于消化的摘要推送给你。
@@ -40,17 +42,19 @@
 2. 在 Work 模式中将本仓库作为本地项目打开（或使用能读取本地文件的 Agent）。
 3. 调用仓库中的 Skill：`.agents/skills/daily-blog-digest/SKILL.md`。
 4. 在会话中输入 **“生成今日早报”** 或 **“获取今日博客早报”**。
-5. Agent 会优先探测 `.runtime/feed-blogs.json`（24 小时内直接复用缓存，防止频繁请求被目标站点限流），并在需要时重新抓取，生成带直达链接与原文引述的中文早报。
+5. Agent 按美东日期判断缓存：跨日首次请求自动抓取；同日且不超过 24 小时才可复用。每次重新过滤 72 小时窗口，报告抓取时间与新增/保留篇数。
+
+日常输出采用 `prompts/personal-daily-digest.md`：最多 3 条与个人阅读、整理、写作或小工具有关的内容，每条说明用途、使用门槛及是否值得尝试；允许零条，每日最多一个小尝试。大企业案例、跑分和底层技术默认不进入日报。用户授权的三天试运行通过当前会话定时跟进，第三天结束，不启用 GitHub Actions。
 
 ### 2. 通过 CLI 命令行手动运行
 所有命令在仓库根目录执行，运行数据统一输出至被 Git 忽略的 `.runtime/` 目录：
 
 ```bash
-# 第一步：抓取最新官方博客文章（写入 .runtime/feed-blogs.json）
-node scripts/generate-feed.js --blogs-only --feed-dir .runtime
+# 日常入口：自动判断跨日刷新或同日复用
+node scripts/run-daily-digest.js --feed-dir .runtime --timezone America/New_York --language zh
 
-# 第二步：预处理并读取摘要物料（校验 24 小时时效并注入中文提示词）
-node scripts/prepare-digest.js --local --blogs-only --feed-dir .runtime --max-feed-age-hours 24 --language zh
+# 最新 / 刷新 / 完整重跑：无条件联网抓取
+node scripts/run-daily-digest.js --feed-dir .runtime --timezone America/New_York --language zh --force-refresh
 ```
 
 上述命令把生成的 feed 与状态文件写入被 Git 忽略的 `.runtime/`，不会修改仓库中受跟踪的 feed 文件。

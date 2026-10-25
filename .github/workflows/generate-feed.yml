@@ -1,9 +1,7 @@
 name: Generate Feeds
 
 on:
-  schedule:
-    # All feeds (tweets, podcasts, blogs): once daily at 6:17am UTC
-    - cron: '17 6 * * *'
+  # Project paused: no automatic triggers. See docs/PROJECT-STATUS.md.
   workflow_dispatch:
     inputs:
       mode:
@@ -19,6 +17,8 @@ on:
 
 jobs:
   generate:
+    # Explicitly restore only after the owner resumes the project.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

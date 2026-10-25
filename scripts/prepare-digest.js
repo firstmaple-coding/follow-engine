@@ -23,6 +23,7 @@ import { existsSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
+import { DEFAULT_TIME_ZONE, filterCurrentBlogs, localDate } from './daily-freshness.js';
 
 // -- Constants & Paths -------------------------------------------------------
 
@@ -118,6 +119,11 @@ async function main() {
   const args = process.argv.slice(2);
   const isLocalMode = args.includes('--local') || process.env.FEED_SOURCE === 'local';
   const isBlogsOnly = args.includes('--blogs-only') || process.env.BLOGS_ONLY === '1';
+  const daily = args.includes('--daily');
+  const timezoneIndex = args.indexOf('--timezone');
+  const timeZone = timezoneIndex < 0 ? (process.env.DIGEST_TIMEZONE || DEFAULT_TIME_ZONE) : args[timezoneIndex + 1];
+  if (timezoneIndex >= 0 && (!timeZone || timeZone.startsWith('--'))) throw new Error('--timezone requires an IANA timezone');
+  if (daily) localDate(Date.now(), timeZone);
 
   const feedDirArgIndex = args.indexOf('--feed-dir');
   const feedDir = resolve(feedDirArgIndex !== -1 ? args[feedDirArgIndex + 1] : (process.env.FEED_DIR || REPO_ROOT));
@@ -230,6 +236,15 @@ async function main() {
     if (resBlogs.error) errors.push(resBlogs.error);
   }
 
+  if (daily && feedBlogs) {
+    const generated = Date.parse(feedBlogs.generatedAt);
+    const now = Date.now();
+    if (!Number.isFinite(generated) || generated > now || now - generated > 24 * 3600000 ||
+        localDate(generated, timeZone) !== localDate(now, timeZone)) {
+      throw new Error(`Blog feed requires refresh for today in ${timeZone}; run scripts/run-daily-digest.js.`);
+    }
+  }
+
   // Filter out stale feeds if maxFeedAgeHours is set, preventing old feeds from masquerading as today's content
   if (maxFeedAgeHours !== null) {
     const now = Date.now();
@@ -280,7 +295,8 @@ async function main() {
 
   // Filter blog posts to enforce mandatory original source link rule:
   // Must have a non-empty, valid HTTP(S) URL (rejects empty/whitespace, non-HTTP(S), and invalid URLs)
-  const validBlogPosts = (feedBlogs?.blogs || []).filter(b => {
+  const currentBlogs = daily ? filterCurrentBlogs(feedBlogs?.blogs) : (feedBlogs?.blogs || []);
+  const validBlogPosts = currentBlogs.filter(b => {
     const rawUrl = typeof b?.url === 'string' ? b.url.trim() : '';
     if (!rawUrl) {
       errors.push(`Blog post "${b?.title || 'Untitled'}" missing or empty url; excluded per mandatory link rule.`);
@@ -433,6 +449,8 @@ async function main() {
       xBuilders: feedX?.x?.length || 0,
       totalTweets: (feedX?.x || []).reduce((sum, a) => sum + a.tweets.length, 0),
       blogPosts: validBlogPosts.length,
+      excludedBlogPosts: daily ? (feedBlogs?.blogs?.length || 0) - validBlogPosts.length : 0,
+      failedBlogSources: feedBlogs?.stats?.failedSources ?? null,
       feedGeneratedAt: feedX?.generatedAt || feedPodcasts?.generatedAt || feedBlogs?.generatedAt || null
     },
 
